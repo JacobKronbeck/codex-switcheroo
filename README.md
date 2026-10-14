@@ -15,6 +15,42 @@ validation. See [validation notes](docs/VALIDATION.md).
 
 ## Setup
 
+### v0.1 release downloads
+
+Download the Linux `.tar.gz` or Windows `.zip` package from
+[GitHub Releases](https://github.com/JacobKronbeck/codex-switcheroo/releases/latest).
+Extract it to a permanent folder before setup. These are Python source packages;
+Python 3.10 or newer and the ChatGPT desktop app must already be installed.
+Setup installs dependencies from PyPI and asks whether to create a desktop icon;
+press Enter to skip it. No administrator access is needed for the shortcut.
+
+**Linux (including Fedora):**
+
+```bash
+bash setup-linux.sh
+# Explicit choice for unattended setup:
+bash setup-linux.sh --desktop-icon
+# Or: bash setup-linux.sh --no-desktop-icon
+```
+
+**Windows:** open PowerShell in the extracted folder:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-windows.ps1
+# Explicit choice for unattended setup:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-windows.ps1 -DesktopIcon
+# Or use -NoDesktopIcon
+```
+
+The execution policy option applies only to that PowerShell process. Keep the
+extracted folder in place after creating a shortcut; rerun the shortcut installer
+after moving it. On Linux, desktop environments may require **Allow Launching**.
+Release archives do not have Git history: download a newer release to update.
+The Linux desktop launcher's automatic Git updates apply to cloned checkouts.
+`SHA256SUMS` provides SHA-256 hashes for both downloads.
+
+### Manual setup from a checkout
+
 Install Python 3.10 or newer and the ChatGPT desktop app. Open a terminal in this
 repository. The reader uses the bundled Codex executable when found, otherwise
 `codex` on PATH. Use `init --app PATH --codex PATH` if discovery fails.
@@ -64,6 +100,12 @@ matches require `init --app PATH`. The executable must accept direct launch with
 profile-specific environment variables; some Store versions may be incompatible.
 Run `doctor` if an app update changes its path, then edit the local config at the
 printed state path.
+
+For an optional Windows desktop shortcut after manual setup:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-desktop.ps1
+```
 
 ## Account picker
 
@@ -116,21 +158,34 @@ native window handles; Linux uses `wmctrl` when available and able to see the
 window. If activation fails (including on Wayland), the tool launches the same
 profile command again to ask the desktop app to restore or recreate its window.
 The desktop's single-instance handler reuses that profile's running instance.
-The picker reports a reopen request because a running process alone cannot
-confirm that a visible window exists.
+After launching, the picker checks for the selected account's visible window
+every quarter second for up to 10 seconds, then refreshes the list automatically.
+Once detected, a signed-in account shows its green running indicator without
+pressing Refresh. If the window cannot be confirmed or detection is unavailable,
+the picker reports that instead of claiming the window is running.
 Account and process status refresh before each picker display and before opening.
 After a selection, the picker stays running. Press **r** to refresh, **b** to
 return to the home screen, or **q** or **Ctrl+C** to quit. Account windows keep running.
 Ctrl+C also quits during enrollment, editing, refresh, or Docker status. Screen
 clearing applies to interactive terminals; redirected output remains plain text.
 
+Type **q#** (for example, `q2`) to request that just that account's window quit.
+Type **q*** to quit all account windows, including accounts removed from the list.
+Type **remove #** (for example, `remove 2`) to remove an account from the saved
+list. Local profile data and existing windows are kept; the removed account stays
+off the list after refresh and restart. Use **a** to add an account again.
+Press **h** for a concise command reference, then **b** to return.
+
 Press **e** to select an account and edit the label after its email. Enter a blank
 label to remove it. Labels are saved locally and retained across refreshes and
 restarts for the same account/workspace.
 
 Press **d** for **Docker Status** on Linux. This runs `systemctl --user --no-pager
-status docker` for rootless Docker under your user account, without sudo. The page displays the
-command output, including inactive or failed service status; **r** reruns it,
+status docker` for rootless Docker under your user account, without sudo. A container
+table lists names, IDs, images, status/uptime, health (when configured), and ports
+for running and stopped containers using the current Docker CLI context. Missing
+Docker, connection errors, and empty container lists are reported on the page.
+The page also displays service output, including inactive or failed status; **r** refreshes both,
 **b** returns to accounts, and **q** or **Ctrl+C** quits.
 
 Previously confirmed accounts stay visible after logout or a metadata-reader
@@ -154,7 +209,7 @@ workspace in the browser. If automatic browser opening fails, the
 terminal prints the login URL. During sign-in, enter **b** to return to the
 picker or **q** to quit (press Enter after the key).
 
-The tool waits up to five minutes. Ctrl+C cancels enrollment and returns to the
+The tool waits up to five minutes. Ctrl+C cancels enrollment and quits the
 picker. Failed, cancelled or timed-out enrollment creates no visible account and
 removes only its newly created, unregistered directory. Successful login is
 confirmed through `account/read`, saved, and immediately opens that account's
@@ -198,7 +253,7 @@ chatgpt`; installation uses `sudo dnf upgrade --refresh chatgpt`. Windows uses
 installation uses `winget upgrade` for that ID. Unsupported or failed ordinary
 checks leave selection usable. Explicit installation refuses while any matching
 app process is running; quit windows and background instances yourself first.
-The launcher never automatically closes account windows. Fedora codex-launcher
+Explicit **q#** and **q*** commands request account windows quit. Fedora codex-launcher
 wrappers are matched to their sibling ChatGPT process for running indicators
 and update-install protection.
 
@@ -237,7 +292,8 @@ temporary state and mocked processes, including fake stdio protocol servers.
 They do not make live authentication requests, stop a real app or install updates.
 
 [Project handoff](docs/HANDOFF.md) records implementation decisions and remaining
-manual checks. This change is local source preparation; it has not been published.
+manual checks. See [v0.1 release notes](docs/releases/v0.1.md) for platform packages
+and installation options.
 
 ## Sources
 

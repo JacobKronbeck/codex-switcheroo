@@ -220,7 +220,7 @@ def active_profile(config, root):
 
 def refresh_accounts(config, root):
     # The original app is always a discovery candidate, even in an empty config.
-    if 'default' not in config['profiles']:
+    if 'default' not in config['profiles'] and not config.get('default_removed'):
         config['profiles'].insert(0, 'default')
     account_identity.refresh(config, root, launch_spec)
     save_config(root, config)
@@ -252,7 +252,8 @@ def enroll_account(config, root, name=None, workspace=None):
                 print('That workspace is already saved. Using the existing account.')
                 return existing
         if workspace is None and sys.stdin.isatty():
-            workspace = input('Workspace label (optional, e.g. Personal account or Alliant Engineering): ')
+            workspace = input(account_menu.blue('Workspace label', bold=True)
+                              + ' (optional, e.g. Personal account or Alliant Engineering): ')
         if workspace and account_menu.clean(workspace):
             metadata['workspace_label'] = account_menu.clean(workspace)
         config['profiles'].append(name)
@@ -307,13 +308,24 @@ def choose_profile(config, root, active=None):
                 detail.pop('workspace_label', None)
             save_config(root, config)
 
-    return account_menu.choose(config, refresh, enroll, open_selected, save_label)
+    def close_selected(selected):
+        with locked(root):
+            reload_config()
+            return close_account(config, root, selected)
+
+    def remove_selected(selected):
+        with locked(root):
+            reload_config()
+            return remove_account(config, root, selected)
+
+    return account_menu.choose(config, refresh, enroll, open_selected, save_label,
+                               close_selected, remove_selected)
 
 
-def activate_profile(config, root, profile):
-    """Try OS window activation; a running process may have no visible window."""
+def profile_processes(config, root, profile):
+    """Find only the selected profile's main app processes."""
     import psutil
-    pids = []
+    matches = []
     for process in app_processes(config['app']):
         try:
             args = process.cmdline()
@@ -327,9 +339,76 @@ def activate_profile(config, root, profile):
             expected = os.path.normcase(str((root / 'profiles' / profile / 'desktop').resolve()))
             if (profile == 'default' and not paths) or (profile != 'default' and any(
                     os.path.normcase(str(Path(path).resolve())) == expected for path in paths)):
-                pids.append(process.pid)
+                matches.append(process)
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             continue
+    return matches
+
+
+def close_account(config, root, selected):
+    import psutil
+    if selected != '*' and selected not in account_menu.accounts(config):
+        raise SwitchError('Account no longer exists. Refresh and select again.')
+    if selected == '*':
+        # Include windows whose saved entry was removed, as well as the original app.
+        processes = []
+        for process in app_processes(config['app']):
+            try:
+                if not any(arg.startswith('--type=') for arg in process.cmdline()):
+                    processes.append(process)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied as error:
+                raise SwitchError('Could not inspect all account windows. Quit them manually.') from error
+    else:
+        processes = profile_processes(config, root, selected)
+    if not processes:
+        return 'All accounts are already closed.' if selected == '*' else 'Account is already closed.'
+    try:
+        if sys.platform == 'win32':
+            ids = ','.join(str(int(process.pid)) for process in processes)
+            script = ('$failed = $false; '
+                      f'Get-Process -Id {ids} -ErrorAction SilentlyContinue | '
+                      'ForEach-Object { if ($_.MainWindowHandle -ne 0 -and '
+                      '-not $_.CloseMainWindow()) { $failed = $true } }; '
+                      'if ($failed) { exit 1 }; exit 0')
+            result = subprocess.run(['powershell.exe', '-NoProfile', '-Command', script],
+                                    capture_output=True, timeout=5)
+            if result.returncode:
+                raise SwitchError('Could not close this account window. Quit it manually.')
+        else:
+            for process in processes:
+                try:
+                    process.terminate()
+                except psutil.NoSuchProcess:
+                    continue
+    except psutil.NoSuchProcess:
+        pass
+    except (psutil.AccessDenied, subprocess.TimeoutExpired) as error:
+        raise SwitchError('Could not close this account window. Quit it manually.') from error
+    return 'Requested all account windows quit.' if selected == '*' else 'Requested account window quit.'
+
+
+def remove_account(config, root, selected):
+    """Forget a saved entry without deleting account data or closing windows."""
+    if selected not in account_menu.accounts(config):
+        raise SwitchError('Account no longer exists. Refresh and select again.')
+    updated = dict(config, profiles=[name for name in config['profiles'] if name != selected],
+                   details={name: detail for name, detail in config.get('details', {}).items()
+                            if name != selected})
+    if selected == 'default':
+        updated['default_removed'] = True
+    if updated.get('last_opened') == selected:
+        updated.pop('last_opened')
+    save_config(root, updated)
+    config.clear()
+    config.update(updated)
+    return 'Account removed from list. Local data and windows kept.'
+
+
+def activate_profile(config, root, profile):
+    """Try OS window activation; a running process may have no visible window."""
+    pids = [process.pid for process in profile_processes(config, root, profile)]
     try:
         if sys.platform == 'win32' and pids:
             ids = ','.join(str(int(pid)) for pid in pids)
@@ -353,6 +432,20 @@ def activate_profile(config, root, profile):
     return False
 
 
+def wait_for_window(config, root, selected, timeout=10):
+    """Wait for an actual profile window, without repeating account lookups."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if selected in open_profiles(config, root, windows_only=True):
+            return True
+        if config.get('_window_status_available') is False:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.25, remaining))
+
+
 def open_account(config, root, selected):
     active = refresh_accounts(config, root)
     running = selected in active or selected in open_profiles(config, root)
@@ -372,10 +465,13 @@ def open_account(config, root, selected):
     save_config(root, config)
     start_identity_watch(selected)
     email = config.get('details', {}).get(selected, {}).get('email')
-    if running:
-        print('Requested window reopen for ' + (email or 'this account') + '.')
+    if wait_for_window(config, root, selected):
+        print('Account window is running: ' + (email or 'this account') + '.')
     else:
-        print('Opened ' + (email or 'account window') + '. Sign in if requested.')
+        action = 'Requested window reopen for ' if running else 'Requested window open for '
+        reason = ('Window detection unavailable.' if config.get('_window_status_available') is False
+                  else 'Window not confirmed yet; press r to check again.')
+        print(action + (email or 'this account') + '. ' + reason)
 
 
 def start_identity_watch(profile):
