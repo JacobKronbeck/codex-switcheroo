@@ -10,13 +10,22 @@ timeouts, early/unrelated notifications, helper cleanup, duplicate reuse,
 immediate launch, configuration compatibility, profile isolation, update-install
 refusal and preservation of running windows.
 
-The latest run passes all 83 tests. Additional coverage checks Ctrl+C quits
+The latest local run passes all 106 tests. Additional coverage checks Ctrl+C quits
 without another refresh (including enrollment cleanup), saved label editing and
 removal across refresh/restart, and Docker page refresh/back/quit navigation,
-inactive-service exit codes, missing commands and unsupported platforms.
-Docker subprocess execution is mocked and checks the rootless user service without sudo.
+inactive-service exit codes, missing commands and unsupported platforms. Container
+coverage includes names, images, uptime/health, ports, stopped containers, empty
+lists, query errors and timeouts. Automated Docker subprocess execution is mocked.
+A live read-only container query also confirmed names, IDs, images, uptime and
+port mappings against the local Docker service.
 
 These tests establish command and protocol behavior, not live desktop compatibility.
+
+Release coverage checks platform archive contents and SHA-256 hashes, Linux
+setup's optional icon choices, preservation of existing configuration, and failure
+handling. Release CI also parses both Windows setup scripts and creates and inspects
+the Windows shortcut on its temporary runner before publication. A live Windows
+setup and launch on an end-user desktop remain manual checks.
 
 ## Outstanding manual desktop checks
 

@@ -1,0 +1,71 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Check Windows setup scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($file in @('setup-windows.ps1', 'install-desktop.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors) { throw ($errors | Out-String) }
+          }
+      - name: Verify Windows desktop shortcut
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed' }
+          & ./install-desktop.ps1
+          $path = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Codex Switcheroo.lnk'
+          try {
+            $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
+            $expected = Join-Path $PWD '.venv\Scripts\python.exe'
+            if ($shortcut.TargetPath -ne $expected) { throw 'Incorrect shortcut target' }
+            if ($shortcut.Arguments -ne ('"' + (Join-Path $PWD 'switcheroo.py') + '"')) { throw 'Incorrect shortcut arguments' }
+          } finally {
+            Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+          }
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check tag and build packages
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(cat VERSION)"
+          bash -n setup-linux.sh
+          python build-release.py
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag \
+            --title "Codex Switcheroo $RELEASE_TAG" \
+            --notes-file "docs/releases/$RELEASE_TAG.md"

@@ -4,6 +4,7 @@ import sys
 import contextlib
 import io
 import subprocess
+import re
 
 
 def clean(value):
@@ -11,6 +12,14 @@ def clean(value):
 
 
 def green(value):
+    return _color(value, 32)
+
+
+def blue(value, bold=False):
+    return _color(value, '1;34' if bold else 34)
+
+
+def _color(value, code):
     if not sys.stdout.isatty() or 'NO_COLOR' in os.environ or os.environ.get('TERM') == 'dumb':
         return value
     if os.name == 'nt':
@@ -21,7 +30,7 @@ def green(value):
             return value
         if not ctypes.windll.kernel32.SetConsoleMode(handle, mode.value | 4):
             return value
-    return '\033[32m' + value + '\033[0m'
+    return f'\033[{code}m' + value + '\033[0m'
 
 
 def accounts(config):
@@ -127,10 +136,34 @@ def edit_label(config, save_label):
 def docker_status():
     while True:
         clear_screen()
-        print('Docker Status (rootless user service)\n\nsystemctl --user --no-pager status docker\n', flush=True)
+        print('Docker Status\n', flush=True)
         if sys.platform != 'linux':
             print('Docker service status requires Linux with systemctl.')
         else:
+            print('Containers (current Docker context; includes stopped containers)\n', flush=True)
+            try:
+                result = subprocess.run(
+                    ['docker', 'ps', '--all', '--format',
+                     'table {{.Names}}\t{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'],
+                    capture_output=True, text=True, timeout=10, check=False)
+                if result.returncode:
+                    print('Could not list containers: ' + (clean(result.stderr)
+                          or f'Docker exited with code {result.returncode}.'))
+                else:
+                    # Preserve table spacing while stripping terminal control characters.
+                    lines = result.stdout.splitlines()
+                    if len(lines) <= 1:
+                        print('No containers found in the current Docker context.')
+                    else:
+                        for line in lines:
+                            print(''.join(char for char in line if char.isprintable() or char == '\t'))
+                        print('\nSTATUS includes uptime, health (when configured), or exit details.')
+            except subprocess.TimeoutExpired:
+                print('Docker container query timed out after 10 seconds.')
+            except OSError as error:
+                print('Could not list containers: ' + clean(error))
+
+            print('\nRootless user service\n\nsystemctl --user --no-pager status docker\n', flush=True)
             try:
                 result = subprocess.run(['systemctl', '--user', '--no-pager', 'status', 'docker'], check=False)
                 if result.returncode:
@@ -149,15 +182,52 @@ def docker_status():
             print('Enter r, b, or q.')
 
 
-def choose(config, refresh, enroll, open_account, save_label=None):
+def help_page():
+    clear_screen()
+    rows = [
+        ('#', 'Open or activate account #'),
+        ('q#', 'Quit account # window (e.g. q2)'),
+        ('q*', 'Quit all account windows'),
+        ('remove #', 'Remove account # from the list; keeps local data and windows'),
+        ('a', 'Add account'),
+        ('e', 'Edit account label'),
+        ('d', 'Show Docker status'),
+        ('r', 'Refresh accounts'),
+        ('h', 'Show help'),
+        ('b', 'Back'),
+        ('q / Ctrl+C', 'Quit picker; account windows stay open'),
+    ]
+    headers = ('Command', 'Description')
+    widths = [max(len(row[index]) for row in [headers, *rows]) for index in range(2)]
+    border = '  +' + '+'.join('-' * (width + 2) for width in widths) + '+'
+
+    def print_row(row):
+        print('  | ' + ' | '.join(value.ljust(width) for value, width in zip(row, widths)) + ' |')
+
+    print('Help\n')
+    print(border)
+    print_row(headers)
+    print(border)
+    for row in rows:
+        print_row(row)
+    print(border + '\n')
+    while True:
+        choice = input('b to go back, q to quit: ').strip().lower()
+        if choice == 'b':
+            return
+        if choice == 'q':
+            raise QuitRequested()
+
+
+def choose(config, refresh, enroll, open_account, save_label=None, close_account=None, remove_account=None):
     try:
-        return _choose(config, refresh, enroll, open_account, save_label)
+        return _choose(config, refresh, enroll, open_account, save_label, close_account, remove_account)
     except (KeyboardInterrupt, QuitRequested):
         print()
         return None
 
 
-def _choose(config, refresh, enroll, open_account, save_label):
+def _choose(config, refresh, enroll, open_account, save_label, close_account, remove_account):
     notice = ''
     while True:
         clear_screen()
@@ -170,10 +240,10 @@ def _choose(config, refresh, enroll, open_account, save_label):
         clear_screen()
         print('ChatGPT accounts\n')
         names = show(config, active)
-        print('\n  a. Add account\n  e. Edit account label\n  d. Docker Status\n  r. Refresh\n  b. Back\n  q. Quit')
+        print('\n  a. Add account\n  e. Edit account label\n  d. Docker Status\n  r. Refresh\n  h. Help\n  b. Back\n  q. Quit')
         if notice:
             print('\n' + notice)
-        choice = input('\nChoose account number, a, e, d, r, b, or q: ').strip().lower()
+        choice = input('\nChoose account number or command (h for help): ').strip().lower()
         notice = ''
         if choice == 'q':
             return None
@@ -181,7 +251,22 @@ def _choose(config, refresh, enroll, open_account, save_label):
             continue
         selected = None
         try:
-            if choice == 'a':
+            action = re.fullmatch(r'(q)\s*([0-9]+)|remove\s+([0-9]+)', choice)
+            if choice == 'q*':
+                notice = close_account('*') if close_account else 'Command unavailable.'
+            elif action:
+                number = int(action[2] or action[3])
+                if not 1 <= number <= len(names):
+                    notice = 'Enter a listed account number. Type h for help.'
+                else:
+                    callback = close_account if action[1] else remove_account
+                    if callback is None:
+                        notice = 'Command unavailable.'
+                    else:
+                        notice = callback(names[number - 1])
+            elif choice == 'h':
+                help_page()
+            elif choice == 'a':
                 clear_screen()
                 print('Add account\n  b. Back   q. Quit (press Enter after the key)\n')
                 selected = enroll()
@@ -197,8 +282,9 @@ def _choose(config, refresh, enroll, open_account, save_label):
             elif choice.isdigit() and 1 <= int(choice) <= len(names):
                 selected = names[int(choice) - 1]
             else:
-                notice = 'Enter a listed account number, a, e, d, r, b, or q.'
+                notice = 'Enter a listed account number or command. Type h for help.'
             if selected is not None:
+                print('\nOpening account — waiting for its window…', flush=True)
                 # Preserve one action message in the next screen, not a scrolling log.
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     open_account(selected)

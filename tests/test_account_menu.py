@@ -47,6 +47,47 @@ class AccountMenuTests(unittest.TestCase):
             opened.assert_called_once_with('new')
         enroll.assert_called_once_with()
 
+    def test_quit_number_and_remove_number_keep_picker_running(self):
+        closed, removed, opened = Mock(return_value='Quit requested.'), Mock(return_value='Removed.'), Mock()
+        refresh = Mock(return_value={'personal'})
+        with patch('builtins.input', side_effect=['q1', 'remove 1', 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.choose(self.config, refresh, Mock(), opened, close_account=closed, remove_account=removed)
+        closed.assert_called_once_with('personal')
+        removed.assert_called_once_with('personal')
+        opened.assert_not_called()
+        self.assertEqual(refresh.call_count, 3)
+        self.assertIn('Quit requested.', out.getvalue())
+        self.assertIn('Removed.', out.getvalue())
+
+    def test_invalid_action_numbers_never_call_callbacks(self):
+        closed, removed = Mock(), Mock()
+        with patch('builtins.input', side_effect=['q0', 'q2', 'remove 0', 'remove 2', 'remove', 'q-1', 'q']), contextlib.redirect_stdout(io.StringIO()):
+            menu.choose(self.config, Mock(return_value=set()), Mock(), Mock(), close_account=closed, remove_account=removed)
+        closed.assert_not_called()
+        removed.assert_not_called()
+
+    def test_quit_all_works_with_empty_account_list_and_keeps_picker_running(self):
+        closed, opened = Mock(return_value='Requested all account windows quit.'), Mock()
+        refresh = Mock(return_value=set())
+        with patch('builtins.input', side_effect=['q*', 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.choose({'profiles': []}, refresh, Mock(), opened, close_account=closed)
+        closed.assert_called_once_with('*')
+        opened.assert_not_called()
+        self.assertEqual(refresh.call_count, 2)
+        self.assertIn('Requested all account windows quit.', out.getvalue())
+
+    def test_help_back_and_quit(self):
+        for inputs, refresh_count in [(['h', 'b', 'q'], 2), (['h', 'q'], 1)]:
+            refresh, opened = Mock(return_value=set()), Mock()
+            with patch('builtins.input', side_effect=inputs), contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.choose(self.config, refresh, Mock(), opened)
+            self.assertIn('q#', out.getvalue())
+            self.assertIn('q*', out.getvalue())
+            self.assertIn('remove #', out.getvalue())
+            self.assertIn('keeps local data', out.getvalue())
+            self.assertEqual(refresh.call_count, refresh_count)
+            opened.assert_not_called()
+
     def test_failed_add_returns_to_refreshed_picker(self):
         refresh = Mock(return_value=set())
         with patch('builtins.input', side_effect=['a', 'q']), contextlib.redirect_stdout(io.StringIO()):
@@ -196,15 +237,46 @@ class AccountMenuTests(unittest.TestCase):
     def test_docker_status_refresh_back_and_quit(self):
         for inputs, count, refresh_count in [(['d', 'r', 'b', 'q'], 2, 2), (['d', 'q'], 1, 1)]:
             refresh = Mock(return_value=set())
-            with patch.object(menu.sys, 'platform', 'linux'), patch.object(menu.subprocess, 'run', return_value=Mock(returncode=3)) as run, patch('builtins.input', side_effect=inputs), contextlib.redirect_stdout(io.StringIO()) as out:
+            with patch.object(menu.sys, 'platform', 'linux'), patch.object(menu.subprocess, 'run', return_value=Mock(returncode=3, stderr='Cannot connect to Docker')) as run, patch('builtins.input', side_effect=inputs), contextlib.redirect_stdout(io.StringIO()) as out:
                 menu.choose(self.config, refresh, Mock(), Mock())
-            self.assertEqual(run.call_count, count)
+            self.assertEqual(run.call_count, count * 2)
             run.assert_called_with(['systemctl', '--user', '--no-pager', 'status', 'docker'], check=False)
+            container_calls = [call for call in run.call_args_list if call.args[0][0] == 'docker']
+            self.assertEqual(len(container_calls), count)
+            self.assertEqual(container_calls[0].args[0][:3], ['docker', 'ps', '--all'])
+            self.assertEqual(container_calls[0].kwargs['timeout'], 10)
             self.assertEqual(refresh.call_count, refresh_count)
             self.assertIn('Docker Status', out.getvalue())
             self.assertIn('systemctl --user --no-pager status docker', out.getvalue())
             self.assertNotIn('sudo', out.getvalue())
             self.assertIn('exited with code 3', out.getvalue())
+
+    def test_docker_container_details_and_empty_list(self):
+        header = 'NAMES   CONTAINER ID   IMAGE   STATUS   PORTS\n'
+        details = ('web   abc123   nginx:latest   Up 2 hours (healthy)   8080->80/tcp\n'
+                   'worker   def456   worker:latest   Exited (1) 3 hours ago\n')
+        for listing in (header + details, header):
+            with self.subTest(listing=listing), patch.object(menu.sys, 'platform', 'linux'), patch.object(
+                    menu.subprocess, 'run', side_effect=[
+                        Mock(returncode=0, stdout=listing), Mock(returncode=0)]), patch(
+                    'builtins.input', return_value='b'), contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.docker_status()
+            if listing == header:
+                self.assertIn('No containers found', out.getvalue())
+            else:
+                for value in ('web', 'abc123', 'nginx:latest', 'Up 2 hours (healthy)',
+                              '8080->80/tcp', 'worker', 'Exited (1) 3 hours ago'):
+                    self.assertIn(value, out.getvalue())
+            self.assertIn('Rootless user service', out.getvalue())
+
+    def test_docker_query_timeout_still_shows_service_and_allows_back(self):
+        with patch.object(menu.sys, 'platform', 'linux'), patch.object(
+                menu.subprocess, 'run', side_effect=[
+                    menu.subprocess.TimeoutExpired('docker', 10), Mock(returncode=0)]) as run, patch(
+                'builtins.input', return_value='b'), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.docker_status()
+        self.assertIn('timed out after 10 seconds', out.getvalue())
+        run.assert_called_with(['systemctl', '--user', '--no-pager', 'status', 'docker'], check=False)
 
     def test_docker_unavailable_and_unsupported_allow_back(self):
         for platform in ['linux', 'win32']:

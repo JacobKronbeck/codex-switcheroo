@@ -78,7 +78,7 @@ class EnrollmentTests(unittest.TestCase):
         for selected in ('default', 'work'):
             with self.subTest(profile=selected):
                 self.config['profiles'] = ['default', 'work']
-                with patch.object(s, 'refresh_accounts', return_value={selected}), patch.object(s, 'activate_profile', return_value=False), patch.object(s.subprocess, 'Popen') as launch, patch.object(s, 'start_identity_watch'), patch.object(s, 'close_app') as close, contextlib.redirect_stdout(io.StringIO()) as out:
+                with patch.object(s, 'wait_for_window', return_value=False), patch.object(s, 'refresh_accounts', return_value={selected}), patch.object(s, 'activate_profile', return_value=False), patch.object(s.subprocess, 'Popen') as launch, patch.object(s, 'start_identity_watch'), patch.object(s, 'close_app') as close, contextlib.redirect_stdout(io.StringIO()) as out:
                     s.open_account(self.config, self.root, selected)
                 launch.assert_called_once()
                 command = launch.call_args.args[0]
@@ -195,10 +195,20 @@ send({'id':3,'result':{'account':{'type':'chatgpt','email':'new@example.test','a
     def test_enrollment_legacy_name_and_new_window_launch(self):
         with patch.object(identity, 'discover', return_value='fake'), patch.object(identity, 'login', return_value=dict(self.metadata)), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(s.enroll_account(self.config, self.root, 'work'), 'work')
-        with patch.object(s, 'refresh_accounts', return_value={'default'}), patch.object(s.subprocess, 'Popen') as launch, patch.object(s, 'start_identity_watch'), patch.object(s, 'close_app') as close, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(s, 'wait_for_window', return_value=False), patch.object(s, 'refresh_accounts', return_value={'default'}), patch.object(s.subprocess, 'Popen') as launch, patch.object(s, 'start_identity_watch'), patch.object(s, 'close_app') as close, contextlib.redirect_stdout(io.StringIO()):
             s.open_account(self.config, self.root, 'work')
         self.assertIn('--user-data-dir=' + str(self.root / 'profiles/work/desktop'), launch.call_args.args[0])
         close.assert_not_called()
+
+    def test_picker_waits_for_new_window_and_shows_running_without_refresh_input(self):
+        self.config['details'] = {'default': dict(self.metadata)}
+        s.save_config(self.root, self.config)
+        with patch.object(identity, 'refresh'), patch.object(s, 'open_profiles', side_effect=[set(), set(), set(), set(), {'default'}, {'default'}]), patch.object(s.subprocess, 'Popen') as launch, patch.object(s, 'start_identity_watch'), patch.object(s.time, 'sleep') as sleep, patch('builtins.input', side_effect=['1', 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
+            s.choose_profile(self.config, self.root)
+        launch.assert_called_once()
+        sleep.assert_called_once_with(0.25)
+        self.assertIn('Account window is running: new@example.test.', out.getvalue())
+        self.assertIn('● new@example.test', out.getvalue())
 
     def test_linux_activation_targets_profile_window(self):
         self.config['profiles'].append('work')
