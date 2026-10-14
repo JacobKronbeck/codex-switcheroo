@@ -60,11 +60,17 @@ class SwitchTests(unittest.TestCase):
         update.assert_not_called()
         launch.assert_not_called()
 
+    def test_switch_options_work_without_explicit_subcommand(self):
+        with patch.object(s, 'state_root', return_value=self.root), patch.object(s, 'choose_profile') as choose, patch.object(s, 'check_updates') as update, contextlib.redirect_stdout(io.StringIO()):
+            s.main(['--skip-updates'])
+        choose.assert_called_once()
+        update.assert_not_called()
+
     def test_switch_order(self):
         events = []
-        with patch.object(s, 'state_root', return_value=self.root), patch.object(s, 'active_profile', return_value=None), patch.object(s, 'update_command', return_value=['fake']), patch.object(s, 'close_app', side_effect=lambda _: events.append('close')), patch.object(s, 'check_updates', side_effect=lambda _: events.append('update')), patch.object(s, 'choose_profile', side_effect=lambda *args: events.append('choose') or 'work'), patch.object(s.subprocess, 'Popen', side_effect=lambda *a, **k: events.append('launch')), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(s, 'state_root', return_value=self.root), patch.object(s, 'open_profiles', return_value=set()), patch.object(s, 'update_command', return_value=['fake']), patch.object(s, 'close_app', side_effect=lambda _: events.append('close')), patch.object(s, 'check_updates', side_effect=lambda _: events.append('update')), patch.object(s, 'choose_profile', side_effect=lambda *args: events.append('choose')), patch.object(s.subprocess, 'Popen', side_effect=lambda *a, **k: events.append('launch')), contextlib.redirect_stdout(io.StringIO()):
             s.main(['switch'])
-        self.assertEqual(events, ['close', 'update', 'choose', 'launch'])
+        self.assertEqual(events, ['update', 'choose'])
 
     def test_unknown_profile_does_not_close(self):
         with patch.object(s, 'state_root', return_value=self.root), patch.object(s, 'close_app') as close, self.assertRaises(s.SwitchError):

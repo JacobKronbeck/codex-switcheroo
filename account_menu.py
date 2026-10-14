@@ -1,6 +1,8 @@
-"""Terminal presentation using automatically captured account metadata, never credentials."""
+"""Terminal picker for automatically confirmed accounts."""
 import os
 import sys
+import contextlib
+import io
 
 
 def clean(value):
@@ -21,50 +23,121 @@ def green(value):
     return '\033[32m' + value + '\033[0m'
 
 
-def show(config, active=None, previous=False):
-    for index, name in enumerate(config['profiles'], 1):
-        detail = config.get('details', {}).get(name, {})
-        if detail.get('source') != 'app-server':
-            detail = {}
-        status = detail.get('status', 'pending')
-        email = clean(detail.get('email', ''))
-        account = email or {'signed-in': 'ChatGPT account (email unavailable)', 'signed-out': 'Not signed in yet', 'other-auth': 'Non-ChatGPT authentication', 'unavailable': 'Account details unavailable'}.get(status, 'Waiting for first sign-in')
-        if name == active and status == 'signed-in' and email:
-            account = green(account)
-        marker = (' [was open]' if previous else ' [open]') if name == active else ''
-        if not marker and name == config.get('last_opened'):
-            marker = ' [last opened]'
-        print(f'  {index}. {name}{marker} — {account}')
-        plan = clean(detail.get('plan', '')) or 'not available'
-        print(f'     Plan: {plan} | Organization: not provided by app')
-        if status == 'unavailable' and email:
-            print('     Cached details — could not refresh this account')
-    print('Account details come from the local session. Email identifies the account.')
+def accounts(config):
+    details = config.get('details', {})
+    return [name for name in config['profiles']
+            if details.get(name, {}).get('source') == 'app-server'
+            and (details[name].get('confirmed') or details[name].get('status') == 'signed-in')]
 
 
-def choose(config, root, active, save, validate):
+def show(config, active=None):
+    active = {active} if isinstance(active, str) else set(active or ())
+    names = accounts(config)
+    if not names:
+        print('  No accounts\n  Add an account to get started.')
+    for index, name in enumerate(names, 1):
+        detail = config['details'][name]
+        email = clean(detail.get('email', '')) or 'ChatGPT account (email unavailable)'
+        status = detail.get('status')
+        if name in active and status == 'signed-in':
+            label = green('● ' + email)
+            if label == '● ' + email:
+                label += ' [open]'
+        else:
+            label = email
+            if status != 'signed-in':
+                label += ' — ' + {'signed-out': 'Sign-in required', 'other-auth': 'Sign-in required',
+                                  'unavailable': 'Status unavailable'}.get(status, 'Status unavailable')
+        print(f'  {index}. {label}')
+    if names and config.get('_window_status_available') is False:
+        print('\n  Window status unavailable on this desktop.')
+    return names
+
+
+class BackRequested(Exception):
+    pass
+
+
+class QuitRequested(Exception):
+    pass
+
+
+def clear_screen():
+    if sys.stdout.isatty() and os.environ.get('TERM') != 'dumb':
+        if os.name == 'nt':
+            os.system('cls')
+        else:
+            print('\033[2J\033[H', end='', flush=True)
+
+
+def login_navigation():
+    """Poll console input while the helper owns browser callback processing."""
+    if not sys.stdin.isatty():
+        return
+    if os.name == 'nt':
+        import msvcrt
+        if not msvcrt.kbhit():
+            return
+        key = msvcrt.getwch().lower()
+    else:
+        import select
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+        if not readable:
+            return
+        key = sys.stdin.readline().strip().lower()
+    if key == 'b':
+        raise BackRequested()
+    if key == 'q':
+        raise QuitRequested()
+
+
+def choose(config, refresh, enroll, open_account):
+    notice = ''
     while True:
-        print('\nChatGPT accounts')
-        show(config, active, previous=True)
-        print('  a. Add a different account\n  q. Cancel (app stays closed)')
-        choice = input('Choose number, profile name, a, or q: ').strip()
-        if choice.lower() == 'q':
+        clear_screen()
+        print('ChatGPT accounts — refreshing…', flush=True)
+        try:
+            active = refresh()
+        except (OSError, ValueError) as error:
+            active = set()
+            notice = 'Could not refresh: ' + clean(error)
+        clear_screen()
+        print('ChatGPT accounts\n')
+        names = show(config, active)
+        print('\n  a. Add account\n  r. Refresh\n  b. Back\n  q. Quit')
+        if notice:
+            print('\n' + notice)
+        try:
+            choice = input('\nChoose account number, a, r, b, or q: ').strip().lower()
+        except KeyboardInterrupt:
+            notice = 'Use q to quit.'
+            continue
+        notice = ''
+        if choice == 'q':
             return None
-        if choice.lower() == 'a':
-            try:
-                name = validate(input('New profile name (e.g. second-account): ').strip())
-            except ValueError as error:
-                print(error)
-                continue
-            if name in config['profiles']:
-                print('That profile already exists. Select it to sign in.')
-                continue
-            config['profiles'].append(name)
-            save(root, config)
-            print('Sign in with the new account email when this profile opens.')
-            return name
-        if choice in config['profiles']:
-            return choice
-        if choice.isdigit() and 1 <= int(choice) <= len(config['profiles']):
-            return config['profiles'][int(choice) - 1]
-        print('Enter a listed number, profile name, a, or q.')
+        if choice in {'r', 'b'}:
+            continue
+        selected = None
+        try:
+            if choice == 'a':
+                clear_screen()
+                print('Add account\n  b. Back   q. Quit (press Enter after the key)\n')
+                selected = enroll()
+                if selected is None:
+                    notice = 'Account was not added. You can try again.'
+            elif choice.isdigit() and 1 <= int(choice) <= len(names):
+                selected = names[int(choice) - 1]
+            else:
+                notice = 'Enter a listed account number, a, r, b, or q.'
+            if selected is not None:
+                # Preserve one action message in the next screen, not a scrolling log.
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    open_account(selected)
+                lines = output.getvalue().strip().splitlines()
+                notice = lines[-1] if lines else 'Account selected.'
+        except QuitRequested:
+            return None
+        except (BackRequested, KeyboardInterrupt):
+            notice = 'Returned to accounts.'
+        except (OSError, ValueError) as error:
+            notice = clean(error)

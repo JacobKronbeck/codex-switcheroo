@@ -75,10 +75,10 @@ print(json.dumps({'id':2,'result':{'account':{'type':'chatgpt','email':'new@exam
             launch.assert_not_called()
             self.assertEqual(config['details']['new']['status'], 'signed-out')
 
-    def test_watcher_stops_if_another_profile_was_selected(self):
+    def test_watcher_stops_if_profile_was_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            s.save_config(root, {'profiles': ['default', 'new'], 'last_opened': 'default'})
+            s.save_config(root, {'profiles': ['default'], 'last_opened': 'default'})
             with patch.object(identity, 'refresh') as refresh:
                 s.watch_identity(root, 'new', duration=1)
             refresh.assert_not_called()

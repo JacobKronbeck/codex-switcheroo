@@ -10,8 +10,10 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 import account_menu
 import account_identity
+import window_status
 
 
 class SwitchError(ValueError):
@@ -60,7 +62,8 @@ def locked(root):
 def save_config(root, config):
     temporary = root / 'config.tmp'
     with temporary.open('w', encoding='utf-8') as handle:
-        json.dump(config, handle, indent=2)
+        json.dump({key: value for key, value in config.items()
+                   if key != '_window_status_available'}, handle, indent=2)
         handle.flush()
         os.fsync(handle.fileno())
     if os.name != 'nt':
@@ -108,12 +111,16 @@ def launch_spec(config, root, profile):
 
 def app_processes(executable):
     import psutil
-    expected = os.path.normcase(str(Path(executable).resolve()))
+    path = Path(executable).resolve()
+    expected = {os.path.normcase(str(path))}
+    # Fedora's command is a shell wrapper which execs the sibling desktop binary.
+    if path.name == 'codex-launcher' and (path.parent / 'ChatGPT').is_file():
+        expected.add(os.path.normcase(str((path.parent / 'ChatGPT').resolve())))
     matches = []
     for process in psutil.process_iter(['pid', 'exe']):
         try:
             path = process.info['exe']
-            if path and os.path.normcase(str(Path(path).resolve())) == expected:
+            if path and os.path.normcase(str(Path(path).resolve())) in expected:
                 matches.append(process)
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             continue
@@ -164,16 +171,29 @@ def check_updates(install=False):
         print(f'Update command returned {result.returncode}; update status is unknown. Continuing with the installed app.', file=sys.stderr)
 
 
-def active_profile(config, root):
-    """Identify an open profile from launch arguments without inspecting auth."""
+def open_profiles(config, root, *, windows_only=False):
+    """Identify running profiles, optionally requiring an actual desktop window."""
     import psutil
+    visible = None
+    if windows_only:
+        visible = window_status.window_pids()
+        config['_window_status_available'] = visible is not None
+        if visible is None:
+            return set()
     candidates = set()
     for process in app_processes(config['app']):
+        if windows_only and process.pid not in visible:
+            continue
         try:
             args = process.cmdline()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
         if any(arg.startswith('--type=') for arg in args):
+            continue
+        if windows_only and any(arg in {'--ozone-platform=wayland', '--ozone-platform=auto',
+                                        '--ozone-platform-hint=auto'} for arg in args):
+            # Native Wayland windows are absent from the XWayland window list.
+            config['_window_status_available'] = False
             continue
         paths = [arg.split('=', 1)[1] for arg in args if arg.startswith('--user-data-dir=')]
         if '--user-data-dir' in args:
@@ -189,11 +209,154 @@ def active_profile(config, root):
                 expected = os.path.normcase(str((root / 'profiles' / name / 'desktop').resolve()))
                 if any(os.path.normcase(str(Path(path).resolve())) == expected for path in paths):
                     candidates.add(name)
+    return candidates
+
+
+def active_profile(config, root):
+    """Compatibility helper for callers expecting one profile."""
+    candidates = open_profiles(config, root)
     return next(iter(candidates)) if len(candidates) == 1 else None
 
 
+def refresh_accounts(config, root):
+    # The original app is always a discovery candidate, even in an empty config.
+    if 'default' not in config['profiles']:
+        config['profiles'].insert(0, 'default')
+    account_identity.refresh(config, root, launch_spec)
+    save_config(root, config)
+    return open_profiles(config, root, windows_only=True)
+
+
+def enroll_account(config, root, name=None):
+    name = valid_name(name) if name else 'account-' + uuid.uuid4().hex[:12]
+    if name == 'default' or name in config['profiles'] or (root / 'profiles' / name).exists():
+        raise SwitchError('Profile already exists. Select it with switch PROFILE.')
+    base = root / 'profiles' / name
+    registered = False
+    try:
+        executable = account_identity.discover(config)
+        _, env = launch_spec(config, root, name)
+        # Keep newly enrolled credentials scoped to this home, not a shared keyring.
+        settings = base / 'codex' / 'config.toml'
+        settings.write_text('cli_auth_credentials_store = "file"\n', encoding='utf-8')
+        if os.name != 'nt':
+            settings.chmod(0o600)
+        metadata = account_identity.login(executable, env, check_cancel=account_menu.login_navigation)
+        metadata['confirmed'] = True
+        email = metadata.get('email', '').casefold()
+        for existing in account_menu.accounts(config):
+            if email and config['details'][existing].get('email', '').casefold() == email:
+                print('That account is already saved. Using the existing account.')
+                return existing
+        config['profiles'].append(name)
+        config.setdefault('details', {})[name] = metadata
+        save_config(root, config)
+        registered = True
+        print('Account added: ' + (metadata.get('email') or 'ChatGPT account'))
+        return name
+    except (account_identity.IdentityUnavailable, KeyboardInterrupt, OSError) as error:
+        if not registered and name in config['profiles']:
+            config['profiles'].remove(name)
+            config.get('details', {}).pop(name, None)
+        print('Sign-in cancelled.' if isinstance(error, KeyboardInterrupt) else str(error))
+        return None
+    finally:
+        if name not in config['profiles'] and base.exists():
+            shutil.rmtree(base)  # Only the new, unregistered enrollment directory.
+
+
 def choose_profile(config, root, active=None):
-    return account_menu.choose(config, root, active, save_config, valid_name)
+    def reload_config():
+        current = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+        config.clear()
+        config.update(current)
+
+    def refresh():
+        with locked(root):
+            reload_config()
+            return refresh_accounts(config, root)
+
+    def enroll():
+        with locked(root):
+            reload_config()
+            return enroll_account(config, root)
+
+    def open_selected(selected):
+        with locked(root):
+            reload_config()
+            if selected not in config['profiles']:
+                raise SwitchError('Account no longer exists. Refresh and select again.')
+            return open_account(config, root, selected)
+
+    return account_menu.choose(config, refresh, enroll, open_selected)
+
+
+def activate_profile(config, root, profile):
+    """Try OS window activation; a running process may have no visible window."""
+    import psutil
+    pids = []
+    for process in app_processes(config['app']):
+        try:
+            args = process.cmdline()
+            if any(arg.startswith('--type=') for arg in args):
+                continue
+            # Reuse the same profile identification logic on this one process.
+            paths = [arg.split('=', 1)[1] for arg in args if arg.startswith('--user-data-dir=')]
+            if '--user-data-dir' in args:
+                index = args.index('--user-data-dir')
+                paths += args[index + 1:index + 2]
+            expected = os.path.normcase(str((root / 'profiles' / profile / 'desktop').resolve()))
+            if (profile == 'default' and not paths) or (profile != 'default' and any(
+                    os.path.normcase(str(Path(path).resolve())) == expected for path in paths)):
+                pids.append(process.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+    try:
+        if sys.platform == 'win32' and pids:
+            ids = ','.join(str(int(pid)) for pid in pids)
+            script = ("Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; "
+                      "public class SwitcherooWindow { [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h); "
+                      "[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr h, int c); }'; "
+                      f"Get-Process -Id {ids} -ErrorAction SilentlyContinue | ForEach-Object {{ "
+                      "if ($_.MainWindowHandle -ne 0) { [void][SwitcherooWindow]::ShowWindowAsync($_.MainWindowHandle,9); "
+                      "if ([SwitcherooWindow]::SetForegroundWindow($_.MainWindowHandle)) { exit 0 } } }; exit 1")
+            return subprocess.run(['powershell.exe', '-NoProfile', '-Command', script],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+        if sys.platform.startswith('linux') and shutil.which('wmctrl') and pids:
+            result = subprocess.run(['wmctrl', '-lp'], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                fields = line.split(None, 4)
+                if len(fields) >= 3 and fields[2].isdigit() and int(fields[2]) in pids:
+                    return subprocess.run(['wmctrl', '-ia', fields[0]], stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return False
+
+
+def open_account(config, root, selected):
+    active = refresh_accounts(config, root)
+    running = selected in active or selected in open_profiles(config, root)
+    if running and activate_profile(config, root, selected):
+        print('Account window activated.')
+        return
+    # Background processes do not prove that a window exists. Launch the same
+    # profile again so the desktop's per-user-data single-instance handler can
+    # restore/create its window, including on Wayland where wmctrl cannot help.
+    command, env = launch_spec(config, root, selected)
+    try:
+        subprocess.Popen(command, env=env, start_new_session=(os.name != 'nt'),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise SwitchError('Could not launch the app. Run doctor and check the configured executable.') from exc
+    config['last_opened'] = selected
+    save_config(root, config)
+    start_identity_watch(selected)
+    email = config.get('details', {}).get(selected, {}).get('email')
+    if running:
+        print('Requested window reopen for ' + (email or 'this account') + '.')
+    else:
+        print('Opened ' + (email or 'account window') + '. Sign in if requested.')
 
 
 def start_identity_watch(profile):
@@ -212,7 +375,7 @@ def watch_identity(root, profile, duration=300):
         try:
             with locked(root):
                 config = json.loads((root / 'config.json').read_text(encoding='utf-8'))
-                if profile not in config['profiles'] or config.get('last_opened') != profile:
+                if profile not in config['profiles']:
                     return
             # Probe outside the lock so sign-in and other commands remain usable.
             account_identity.refresh(config, root, launch_spec, only=[profile])
@@ -220,7 +383,7 @@ def watch_identity(root, profile, duration=300):
             if metadata.get('status') == 'signed-in':
                 with locked(root):
                     current = json.loads((root / 'config.json').read_text(encoding='utf-8'))
-                    if profile not in current['profiles'] or current.get('last_opened') != profile:
+                    if profile not in current['profiles']:
                         return
                     current.setdefault('details', {})[profile] = metadata
                     save_config(root, current)
@@ -232,6 +395,9 @@ def watch_identity(root, profile, duration=300):
 
 def main(argv=None):
     arguments = sys.argv[1:] if argv is None else argv
+    # Switch is the default action, including when only its options are given.
+    if arguments and arguments[0] in {'--skip-updates', '--install-updates', '--dry-run'}:
+        arguments = ['switch', *arguments]
     if len(arguments) == 2 and arguments[0] == '_watch':
         watch_identity(state_root(), arguments[1])
         return
@@ -240,17 +406,18 @@ def main(argv=None):
     init = sub.add_parser('init', help='Discover app and create local configuration')
     init.add_argument('--app', help='Path to ChatGPT executable')
     init.add_argument('--codex', help='Optional Codex CLI executable for automatic account details')
-    add = sub.add_parser('add', help='Register an empty account profile; switch to it to sign in once')
-    add.add_argument('name')
+    add = sub.add_parser('add', help='Sign in through your browser and open the account')
+    add.add_argument('name', nargs='?', help='Optional legacy internal profile name')
     sub.add_parser('list', help='Show account details and currently open profile')
     sub.add_parser('doctor', help='Print paths and executable status, without opening profile data')
-    switch = sub.add_parser('switch', help='Close, check updates, select and open')
+    switch = sub.add_parser('switch', help='Select and open an account, keeping existing windows open')
     switch.add_argument('profile', nargs='?')
     switch.add_argument('--skip-updates', action='store_true')
     switch.add_argument('--install-updates', action='store_true')
     switch.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(arguments or ['switch'])
     root = state_root()
+    run_picker = False
     with locked(root):
         path = root / 'config.json'
         if args.action == 'init':
@@ -263,23 +430,27 @@ def main(argv=None):
             if args.codex:
                 config['codex'] = str(Path(args.codex).expanduser().resolve())
             save_config(root, config)
-            print('Initialized. default opens your existing app account. Use add NAME for another account.')
+            print('Initialized. Run switch to choose an account or add to sign in.')
             return
         if not path.exists():
             raise SwitchError('Run init first.')
         config = json.loads(path.read_text(encoding='utf-8'))
         profiles = config['profiles']
         if args.action == 'add':
-            name = valid_name(args.name)
-            if name in profiles:
-                raise SwitchError('Profile already exists.')
-            profiles.append(name)
-            save_config(root, config)
-            print(f'Added {name}. Run switch {name} and sign into this profile once.')
+            if not Path(config['app']).is_file():
+                raise SwitchError('App executable moved or was removed. Run doctor.')
+            refresh_accounts(config, root)
+            try:
+                selected = enroll_account(config, root, args.name)
+            except account_menu.QuitRequested:
+                return
+            except account_menu.BackRequested:
+                selected = None
+            if selected is not None:
+                open_account(config, root, selected)
+            run_picker = True
         elif args.action == 'list':
-            account_identity.refresh(config, root, launch_spec)
-            save_config(root, config)
-            account_menu.show(config, active_profile(config, root))
+            account_menu.show(config, refresh_accounts(config, root))
         elif args.action == 'doctor':
             print(f'Local state: {root}\nApp: {config["app"]}\nExecutable exists: {Path(config["app"]).is_file()}')
             try:
@@ -295,31 +466,25 @@ def main(argv=None):
             if args.skip_updates and args.install_updates:
                 raise SwitchError('--skip-updates and --install-updates cannot be combined.')
             if args.dry_run:
-                print(f'Would close {config["app"]}, check updates, select {args.profile or "interactively"}, and launch with isolated profile paths.')
+                print(f'Would select {args.profile or "interactively"}, refresh account/window status, '
+                      'and open or activate the account with isolated profile paths. Existing windows stay open.')
                 return
-            # Check support before closing the app; update errors leave the menu usable.
+            if args.install_updates and app_processes(config['app']):
+                raise SwitchError('Quit all account windows before installing updates. No windows were closed.')
             if not args.skip_updates:
-                update_command(args.install_updates)
-            active = active_profile(config, root)
-            close_app(config['app'])
-            if not args.skip_updates:
-                check_updates(args.install_updates)
-            account_identity.refresh(config, root, launch_spec)
-            save_config(root, config)
-            selected = args.profile or choose_profile(config, root, active)
-            if selected is None:
-                return
-            command, env = launch_spec(config, root, selected)
-            try:
-                subprocess.Popen(command, env=env, start_new_session=(os.name != 'nt'), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as exc:
-                raise SwitchError('Could not launch the app. Run doctor and check the configured executable.') from exc
-            config['last_opened'] = selected
-            save_config(root, config)
-            start_identity_watch(selected)
-            print(f'Opened profile {selected}. Sign in if requested; account details are captured automatically.')
+                try:
+                    check_updates(args.install_updates)
+                except (SwitchError, OSError) as error:
+                    if args.install_updates:
+                        raise
+                    print(str(error) + ' Continuing with the installed app.', file=sys.stderr)
+            if args.profile is not None:
+                open_account(config, root, args.profile)
+            run_picker = True
         else:
             parser.print_help()
+    if run_picker:
+        choose_profile(config, root)
 
 
 if __name__ == '__main__':
@@ -329,5 +494,5 @@ if __name__ == '__main__':
         print(f'Error: {error}', file=sys.stderr)
         sys.exit(1)
     except (KeyboardInterrupt, EOFError):
-        print('\nCancelled. If already closed, ChatGPT remains closed.', file=sys.stderr)
+        print('\nCancelled. Existing account windows remain open.', file=sys.stderr)
         sys.exit(130)

@@ -55,81 +55,154 @@ def normalize(result):
     return metadata
 
 
-def read_account(executable, env, timeout=5):
-    process = None
-    messages = queue.Queue()
-    try:
-        process = subprocess.Popen(
+class Session:
+    """One bounded stdio helper; retains notifications arriving before replies."""
+    def __init__(self, executable, env, timeout):
+        self.check_cancel = None
+        self.deadline = time.monotonic() + timeout
+        self.messages = queue.Queue()
+        self.pending = []
+        self.process = subprocess.Popen(
             [executable, 'app-server', '--listen', 'stdio://', '-c', 'mcp_servers={}'],
             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding='utf-8', errors='replace',
             cwd=env.get('CODEX_HOME') or str(Path.home()),
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
-
         def collect():
             try:
-                for line in process.stdout:
-                    if len(line) > 1024 * 1024:
-                        continue
-                    try:
-                        messages.put(json.loads(line))
-                    except ValueError:
-                        continue
+                for line in self.process.stdout:
+                    if len(line) <= 1024 * 1024:
+                        try:
+                            self.messages.put(json.loads(line))
+                        except ValueError:
+                            pass
             except (OSError, ValueError):
                 pass
             finally:
-                messages.put(None)
+                self.messages.put(None)
+        self.reader = threading.Thread(target=collect, daemon=True)
+        self.reader.start()
 
-        reader = threading.Thread(target=collect, daemon=True)
-        reader.start()
-        deadline = time.monotonic() + timeout
+    def send(self, message):
+        self.process.stdin.write(json.dumps(message) + '\n')
+        self.process.stdin.flush()
 
-        def send(message):
-            process.stdin.write(json.dumps(message) + '\n')
-            process.stdin.flush()
-
-        def response(identifier):
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise IdentityUnavailable('Account reader timed out.')
-                try:
-                    message = messages.get(timeout=remaining)
-                except queue.Empty:
-                    raise IdentityUnavailable('Account reader timed out.') from None
-                if message is None:
-                    raise IdentityUnavailable('Account reader stopped before responding.')
-                if isinstance(message, dict) and message.get('id') == identifier:
-                    if 'error' in message:
-                        raise IdentityUnavailable('Account reader rejected the metadata request.')
-                    result = message.get('result')
-                    if not isinstance(result, dict):
-                        raise IdentityUnavailable('Invalid account reader response.')
-                    return result
-
-        send({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'codex_switcheroo', 'version': '0.2.0'}}})
-        response(1)
-        send({'method': 'initialized'})
-        send({'id': 2, 'method': 'account/read', 'params': {'refreshToken': False}})
-        return normalize(response(2))
-    except (OSError, ValueError) as error:
-        raise IdentityUnavailable('Could not read account metadata through Codex.') from error
-    finally:
-        if process is not None:
-            if process.stdin:
-                with contextlib.suppress(OSError):
-                    process.stdin.close()
-            if process.poll() is None:
-                with contextlib.suppress(OSError):
-                    process.terminate()
+    def receive(self, predicate):
+        for index, message in enumerate(self.pending):
+            if predicate(message):
+                return self.pending.pop(index)
+        while True:
+            if self.check_cancel:
+                self.check_cancel()
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise IdentityUnavailable('Account operation timed out.')
             try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()  # Only our short-lived metadata helper, never the app.
-                process.wait(timeout=2)
-            if process.stdout:
-                with contextlib.suppress(OSError):
-                    process.stdout.close()
+                message = self.messages.get(timeout=min(remaining, 0.1) if self.check_cancel else remaining)
+            except queue.Empty:
+                if self.check_cancel:
+                    continue
+                raise IdentityUnavailable('Account operation timed out.') from None
+            if message is None:
+                raise IdentityUnavailable('Account helper stopped before responding.')
+            if not isinstance(message, dict):
+                continue
+            if predicate(message):
+                return message
+            if len(self.pending) < 100:
+                self.pending.append(message)
+
+    def request(self, identifier, method, params=None):
+        self.send({'id': identifier, 'method': method, 'params': params or {}})
+        message = self.receive(lambda item: item.get('id') == identifier)
+        if 'error' in message or not isinstance(message.get('result'), dict):
+            raise IdentityUnavailable('Account helper rejected the request.')
+        return message['result']
+
+    def initialize(self):
+        self.request(1, 'initialize', {'clientInfo': {'name': 'codex_switcheroo', 'version': '0.3.0'}})
+        self.send({'method': 'initialized'})
+
+    def close(self):
+        if self.process.stdin:
+            with contextlib.suppress(OSError):
+                self.process.stdin.close()
+        if self.process.poll() is None:
+            with contextlib.suppress(OSError):
+                self.process.terminate()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()  # Only our helper, never the desktop app.
+            self.process.wait(timeout=2)
+        if self.process.stdout:
+            self.process.stdout.close()
+        self.reader.join(timeout=2)
+
+
+@contextlib.contextmanager
+def session(executable, env, timeout, check_cancel=None):
+    helper = None
+    try:
+        helper = Session(executable, env, timeout)
+        helper.check_cancel = check_cancel
+        helper.initialize()
+        yield helper
+    except (OSError, ValueError) as error:
+        raise IdentityUnavailable('Could not communicate with the account helper.') from error
+    finally:
+        if helper is not None:
+            helper.close()
+
+
+def read_account(executable, env, timeout=5):
+    with session(executable, env, timeout) as helper:
+        return normalize(helper.request(2, 'account/read', {'refreshToken': False}))
+
+
+def login(executable, env, timeout=300, open_browser=None, check_cancel=None):
+    import webbrowser
+    from urllib.parse import urlparse
+    opener = open_browser or webbrowser.open
+    with session(executable, env, timeout, check_cancel) as helper:
+        login_id = None
+        try:
+            result = helper.request(2, 'account/login/start', {'type': 'chatgpt'})
+            login_id = result.get('loginId')
+            url = result.get('authUrl', '')
+            parsed = urlparse(url)
+            if not login_id or parsed.scheme != 'https' or not parsed.hostname:
+                raise IdentityUnavailable('Account helper returned an invalid login URL.')
+            print('Complete sign-in in your browser. Press Ctrl+C to cancel.')
+            try:
+                opened = opener(url)
+            except Exception:
+                opened = False
+            if not opened:
+                print('Open this login URL in your browser: ' + url)
+            completed = helper.receive(lambda item: item.get('method') == 'account/login/completed'
+                                       and item.get('params', {}).get('loginId') == login_id)
+            if completed.get('params', {}).get('success') is not True:
+                raise IdentityUnavailable('Sign-in was cancelled or failed. Try Add account again.')
+            metadata = normalize(helper.request(3, 'account/read', {'refreshToken': False}))
+            if metadata['status'] != 'signed-in':
+                raise IdentityUnavailable('Sign-in completed but the account could not be confirmed.')
+            return metadata
+        except BaseException:
+            if login_id:
+                with contextlib.suppress(OSError, ValueError):
+                    helper.send({'id': 4, 'method': 'account/login/cancel', 'params': {'loginId': login_id}})
+            raise
+
+
+def remembered(previous, metadata):
+    if previous.get('source') == 'app-server' and (previous.get('confirmed') or previous.get('status') == 'signed-in'):
+        metadata['confirmed'] = True
+        if not metadata.get('email') and previous.get('email'):
+            metadata['email'] = previous['email']
+    if metadata.get('status') == 'signed-in':
+        metadata['confirmed'] = True
+    return metadata
 
 
 def refresh(config, root, launch_spec, only=None):
@@ -137,7 +210,7 @@ def refresh(config, root, launch_spec, only=None):
         executable = discover(config)
     except IdentityUnavailable:
         for name in only or config['profiles']:
-            config.setdefault('details', {})[name] = {'source': 'app-server', 'status': 'unavailable'}
+            config.setdefault('details', {})[name] = remembered(config.get('details', {}).get(name, {}), {'source': 'app-server', 'status': 'unavailable'})
         return
     for name in only or config['profiles']:
         if name != 'default' and not (root / 'profiles' / name / 'codex').is_dir():
@@ -151,4 +224,4 @@ def refresh(config, root, launch_spec, only=None):
                 # Keep only earlier automatic metadata, explicitly marked stale.
                 metadata = {key: previous[key] for key in ('source', 'status', 'type', 'email', 'plan') if key in previous} if previous.get('source') == 'app-server' else {}
                 metadata.update(source='app-server', status='unavailable')
-        config.setdefault('details', {})[name] = metadata
+        config.setdefault('details', {})[name] = remembered(config.get('details', {}).get(name, {}), metadata)

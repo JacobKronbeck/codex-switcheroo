@@ -13,32 +13,63 @@ class AccountMenuTests(unittest.TestCase):
     def setUp(self):
         self.config = {'app': '/fake/app', 'profiles': ['default', 'personal'], 'details': {'personal': {'source': 'app-server', 'status': 'signed-in', 'email': 'user@example.test', 'plan': 'pro'}}}
 
-    def test_menu_shows_details_and_accepts_name(self):
-        with patch('builtins.input', return_value='personal'), contextlib.redirect_stdout(io.StringIO()) as out:
-            result = menu.choose(self.config, Path('/fake'), None, Mock(), s.valid_name)
-        self.assertEqual(result, 'personal')
-        for value in ('user@example.test', 'pro', 'Add a different account'):
-            self.assertIn(value, out.getvalue())
+    def test_number_selection_hides_presets_and_extra_details(self):
+        refresh = Mock(return_value=set())
+        with patch('builtins.input', side_effect=['1', 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
+            opened = Mock()
+            result = menu.choose(self.config, refresh, Mock(), opened)
+        self.assertIsNone(result)
+        opened.assert_called_once_with('personal')
+        self.assertIn('1. user@example.test', out.getvalue())
+        self.assertIn('a. Add account', out.getvalue())
+        for value in ('default', 'personal', 'Plan:', 'Organization:', 'last opened'):
+            self.assertNotIn(value, out.getvalue())
+        self.assertEqual(refresh.call_count, 2)
 
-    def test_add_from_menu_saves_then_selects(self):
-        save = Mock()
-        with patch('builtins.input', side_effect=['a', 'second-account']), contextlib.redirect_stdout(io.StringIO()):
-            name = menu.choose(self.config, Path('/fake'), None, save, s.valid_name)
-        self.assertEqual(name, 'second-account')
-        self.assertIn(name, self.config['profiles'])
-        self.assertNotIn(name, self.config['details'])
-        save.assert_called_once()
+    def test_successful_add_selects_confirmed_account(self):
+        enroll = Mock(return_value='new')
+        with patch('builtins.input', side_effect=['a', 'q']), contextlib.redirect_stdout(io.StringIO()):
+            opened = Mock()
+            self.assertIsNone(menu.choose(self.config, Mock(return_value=set()), enroll, opened))
+            opened.assert_called_once_with('new')
+        enroll.assert_called_once_with()
 
-    def test_invalid_add_stays_in_menu(self):
-        with patch('builtins.input', side_effect=['a', '../escape', 'q']), contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNone(menu.choose(self.config, Path('/fake'), None, Mock(), s.valid_name))
+    def test_failed_add_returns_to_refreshed_picker(self):
+        refresh = Mock(return_value=set())
+        with patch('builtins.input', side_effect=['a', 'q']), contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(menu.choose(self.config, refresh, Mock(return_value=None), Mock()))
+        self.assertEqual(refresh.call_count, 2)
 
-    def test_cancelled_enrollment_does_not_save(self):
-        save = Mock()
-        with patch('builtins.input', side_effect=['a', KeyboardInterrupt]), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
-            menu.choose(self.config, Path('/fake'), None, save, s.valid_name)
-        save.assert_not_called()
-        self.assertNotIn('second-account', self.config['profiles'])
+    def test_old_empty_config_shows_no_accounts(self):
+        self.config.pop('details')
+        with patch('builtins.input', return_value='q'), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.choose(self.config, Mock(return_value=set()), Mock(), Mock())
+        self.assertIn('No accounts', out.getvalue())
+        self.assertIn('Add an account to get started', out.getvalue())
+
+    def test_stale_and_signed_out_accounts_remain_without_green(self):
+        detail = self.config['details']['personal']
+        detail['confirmed'] = True
+        for status in ('signed-out', 'unavailable'):
+            detail['status'] = status
+            with patch.object(menu, 'green') as green, contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.show(self.config, {'personal'})
+            green.assert_not_called()
+            self.assertIn('user@example.test', out.getvalue())
+            self.assertNotIn('[open]', out.getvalue())
+
+    def test_green_dot_and_email_for_all_open_accounts(self):
+        self.config['details']['default'] = dict(self.config['details']['personal'], email='second@example.test')
+        with patch.object(menu, 'green', side_effect=lambda value: '<green>' + value) as green, contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.show(self.config, {'default', 'personal'})
+        self.assertEqual(green.call_count, 2)
+        self.assertIn('<green>● user@example.test', out.getvalue())
+        self.assertIn('<green>● second@example.test', out.getvalue())
+
+    def test_plain_terminal_shows_open_marker(self):
+        with patch.object(menu, 'green', side_effect=lambda value: value), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.show(self.config, {'personal'})
+        self.assertIn('● user@example.test [open]', out.getvalue())
 
     def test_terminal_controls_are_removed(self):
         self.assertEqual(menu.clean('Name\n\033\t'), 'Name')
@@ -51,41 +82,72 @@ class AccountMenuTests(unittest.TestCase):
         with patch.object(menu.sys.stdout, 'isatty', return_value=False):
             self.assertEqual(menu.green('User'), 'User')
 
-    def test_last_opened_is_not_green_or_claimed_logged_in(self):
+    def test_multiple_open_profiles_detected_and_children_ignored(self):
+        root = Path('/fake').resolve()
+        first, second, child = Mock(), Mock(), Mock()
+        first.cmdline.return_value = ['/fake/app']
+        second.cmdline.return_value = ['/fake/app', '--user-data-dir', str(root / 'profiles/personal/desktop')]
+        child.cmdline.return_value = ['/fake/app', '--type=renderer']
+        with patch.object(s, 'app_processes', return_value=[first, second, child]):
+            self.assertEqual(s.open_profiles(self.config, root), {'default', 'personal'})
+        with patch.object(s, 'app_processes', return_value=[]):
+            self.assertEqual(s.open_profiles(self.config, root), set())
+
+    def test_last_opened_never_claimed_open(self):
         self.config['last_opened'] = 'personal'
         with patch.object(menu, 'green') as green, contextlib.redirect_stdout(io.StringIO()) as out:
             menu.show(self.config)
         green.assert_not_called()
-        self.assertIn('[last opened]', out.getvalue())
         self.assertNotIn('[open]', out.getvalue())
+        self.assertNotIn('last opened', out.getvalue())
 
-    def test_only_open_profile_username_is_green(self):
-        with patch.object(menu, 'green', side_effect=lambda v: '<green>' + v) as green, contextlib.redirect_stdout(io.StringIO()) as out:
-            menu.show(self.config, 'personal', previous=True)
-        green.assert_called_once_with('user@example.test')
-        self.assertIn('[was open]', out.getvalue())
-
-    def test_active_profile_recognizes_managed_path(self):
+    def test_background_process_does_not_count_as_open_window(self):
         root = Path('/fake').resolve()
-        process = Mock()
+        process = Mock(pid=123)
         process.cmdline.return_value = ['/fake/app', '--user-data-dir=' + str(root / 'profiles/personal/desktop')]
-        with patch.object(s, 'app_processes', return_value=[process]):
-            self.assertEqual(s.active_profile(self.config, root), 'personal')
+        with patch.object(s, 'app_processes', return_value=[process]), patch.object(s.window_status, 'window_pids', side_effect=[{123}, set(), None]):
+            self.assertEqual(s.open_profiles(self.config, root, windows_only=True), {'personal'})
+            self.assertEqual(s.open_profiles(self.config, root, windows_only=True), set())
+            self.assertTrue(self.config['_window_status_available'])
+            self.assertEqual(s.open_profiles(self.config, root, windows_only=True), set())
+            self.assertFalse(self.config['_window_status_available'])
+            self.assertEqual(s.open_profiles(self.config, root), {'personal'})
+        with patch.object(menu, 'green') as green, contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.show(self.config, set())
+        green.assert_not_called()
+        self.assertIn('Window status unavailable', out.getvalue())
 
-    def test_multiple_open_profiles_are_not_guessed(self):
-        root = Path('/fake').resolve()
-        first, second = Mock(), Mock()
-        first.cmdline.return_value = ['/fake/app']
-        second.cmdline.return_value = ['/fake/app', '--user-data-dir=' + str(root / 'profiles/personal/desktop')]
-        with patch.object(s, 'app_processes', return_value=[first, second]):
-            self.assertIsNone(s.active_profile(self.config, root))
+    def test_refresh_back_multiple_selections_and_quit(self):
+        opened = Mock()
+        refresh = Mock(return_value={'personal'})
+        with patch('builtins.input', side_effect=['r', '1', 'b', '1', 'q']), patch.object(menu, 'clear_screen') as clear, contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.choose(self.config, refresh, Mock(), opened)
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(refresh.call_count, 5)
+        self.assertEqual(clear.call_count, 10)
+        self.assertIn('r. Refresh', out.getvalue())
+        self.assertIn('b. Back', out.getvalue())
+        self.assertIn('q. Quit', out.getvalue())
+        self.assertNotIn('Cancel', out.getvalue())
 
-    def test_old_config_without_details_still_renders(self):
-        self.config.pop('details')
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            menu.show(self.config)
-        self.assertIn('Waiting for first sign-in', out.getvalue())
+    def test_back_and_quit_during_enrollment(self):
+        for error, inputs, refresh_count in [(menu.BackRequested(), ['a', 'q'], 2), (menu.QuitRequested(), ['a'], 1)]:
+            refresh = Mock(return_value=set())
+            with patch('builtins.input', side_effect=inputs), contextlib.redirect_stdout(io.StringIO()):
+                self.assertIsNone(menu.choose(self.config, refresh, Mock(side_effect=error), Mock()))
+            self.assertEqual(refresh.call_count, refresh_count)
 
+    def test_action_error_keeps_picker_running(self):
+        with patch('builtins.input', side_effect=['1', 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.choose(self.config, Mock(return_value=set()), Mock(), Mock(side_effect=ValueError('Cannot open')))
+        self.assertIn('Cannot open', out.getvalue())
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_ctrl_c_at_picker_does_not_quit(self):
+        with patch('builtins.input', side_effect=[KeyboardInterrupt(), 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
+            menu.choose(self.config, Mock(return_value=set()), Mock(), Mock())
+        self.assertIn('Use q to quit', out.getvalue())
+
+    def test_interactive_terminal_clears_screen(self):
+        with patch.object(menu.os, 'name', 'posix'), patch.object(menu.sys.stdout, 'isatty', return_value=True), patch.dict(menu.os.environ, {'TERM': 'xterm'}), patch('builtins.print') as printed:
+            menu.clear_screen()
+        printed.assert_called_once_with('\033[2J\033[H', end='', flush=True)
