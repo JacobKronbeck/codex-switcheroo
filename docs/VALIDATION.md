@@ -7,7 +7,7 @@
   before the default `Codex` user-data directory and reads `CODEX_HOME`.
 - An internal app launcher uses both environment variables plus `--user-data-dir`.
   This is implementation evidence, not a supported public compatibility contract.
-- Twenty-three unit tests passed locally on Linux with Python and psutil 7.2.2.
+- Thirty-one unit tests passed locally on Linux with Python and psutil 7.2.2.
 - Tests cover isolated homes, default launch, invalid labels, dry-run behavior,
   operation order, unknown profiles, locking, update exit codes, Windows update
   targeting, private atomic config writes and close timeout without forced kill.
@@ -46,14 +46,25 @@ install only with an explicit flag. Do not force-kill the desktop app. Keep all
 local account state outside the source repository. Do not migrate the existing
 profile automatically.
 
-## Account menu changes
+## Automatic account identity update
 
-- Old configs with string profile names still work without migration.
-- Account details are explicitly user-entered; no credentials are inspected.
-- Active profile detection checks app launch arguments, excludes helper
-  processes, and refuses to guess when multiple profiles are detected.
-- Green indicates an open profile (or the profile open immediately before
-  switching), not verified sign-in. Last-opened state is separately labeled.
-- Tests cover metadata display, menu enrollment/cancellation, input sanitization,
-  TTY/NO_COLOR handling, named selection, old configs and ambiguous open profiles.
-- Live terminal rendering and real account switching still need manual checks.
+- Profile creation asks only for a local label; manual identity fields removed.
+- Local app-server `initialize` / `initialized` / `account/read` handshake tested.
+- Read uses `refreshToken: false`; no token refresh is explicitly requested.
+- Only email, plan and auth status are cached; raw responses never logged/saved.
+- Missing readers, timeouts, signed-out and other authentication modes are handled.
+- After launch a detached helper polls for up to five minutes, and the next menu
+  or `list` command refreshes all initialized profiles. Transient errors retry.
+- Display username and organization names are unavailable in the documented and
+  installed app-server schema. Email is displayed rather than a fabricated name.
+- Old manually entered account fields are discarded during automatic refresh.
+- Green indicates a detected open profile with readable local session metadata;
+  it does not independently validate a remote login or the other app surfaces.
+- Thirty-one tests pass locally, including a real stdio handshake with a fake
+  server, allowlist filtering, timeout cleanup, first-login capture and watcher
+  cancellation after a different profile is selected.
+- An isolated empty CODEX_HOME with the actual bundled Linux Codex executable
+  successfully returned signed-out through the protocol; no real credentials
+  were used. Live authenticated capture still needs manual desktop validation.
+
+Source: https://learn.chatgpt.com/docs/app-server

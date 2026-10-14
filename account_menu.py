@@ -1,4 +1,4 @@
-"""Terminal presentation using user-entered account labels, never credentials."""
+"""Terminal presentation using automatically captured account metadata, never credentials."""
 import os
 import sys
 
@@ -24,37 +24,30 @@ def green(value):
 def show(config, active=None, previous=False):
     for index, name in enumerate(config['profiles'], 1):
         detail = config.get('details', {}).get(name, {})
-        username = clean(detail.get('username', '')) or 'Username not set'
-        if name == active:
-            username = green(username)
+        if detail.get('source') != 'app-server':
+            detail = {}
+        status = detail.get('status', 'pending')
+        email = clean(detail.get('email', ''))
+        account = email or {'signed-in': 'ChatGPT account (email unavailable)', 'signed-out': 'Not signed in yet', 'other-auth': 'Non-ChatGPT authentication', 'unavailable': 'Account details unavailable'}.get(status, 'Waiting for first sign-in')
+        if name == active and status == 'signed-in' and email:
+            account = green(account)
         marker = (' [was open]' if previous else ' [open]') if name == active else ''
         if not marker and name == config.get('last_opened'):
             marker = ' [last opened]'
-        print(f'  {index}. {name}{marker} — {username}')
-        print(f"     Email: {clean(detail.get('email', '')) or 'not set'} | Org: {clean(detail.get('org', '')) or 'not set'}")
-    print('Details are your saved labels. Verify the signed-in account in the app.')
-
-
-def edit(config, name, args=None):
-    detail = config.setdefault('details', {}).setdefault(name, {})
-    fields = [('username', 'Username / display name'), ('email', 'Account email'), ('org', 'Organization / workspace')]
-    interactive = args is None or not any(getattr(args, key, None) is not None for key, _ in fields)
-    for field, label in fields:
-        supplied = getattr(args, field, None) if args is not None else None
-        if supplied is not None:
-            detail[field] = clean(supplied)
-        elif interactive:
-            value = input(f'{label} [{clean(detail.get(field, "not set"))}] (Enter to keep): ').strip()
-            if value:
-                detail[field] = clean(value)
+        print(f'  {index}. {name}{marker} — {account}')
+        plan = clean(detail.get('plan', '')) or 'not available'
+        print(f'     Plan: {plan} | Organization: not provided by app')
+        if status == 'unavailable' and email:
+            print('     Cached details — could not refresh this account')
+    print('Account details come from the local session. Email identifies the account.')
 
 
 def choose(config, root, active, save, validate):
     while True:
         print('\nChatGPT accounts')
         show(config, active, previous=True)
-        print('  a. Add a different account\n  e. Edit account details\n  q. Cancel (app stays closed)')
-        choice = input('Choose number, profile name, a, e, or q: ').strip()
+        print('  a. Add a different account\n  q. Cancel (app stays closed)')
+        choice = input('Choose number, profile name, a, or q: ').strip()
         if choice.lower() == 'q':
             return None
         if choice.lower() == 'a':
@@ -66,22 +59,12 @@ def choose(config, root, active, save, validate):
             if name in config['profiles']:
                 print('That profile already exists. Select it to sign in.')
                 continue
-            # Persist only once all prompts have completed.
-            edit(config, name)
             config['profiles'].append(name)
             save(root, config)
             print('Sign in with the new account email when this profile opens.')
             return name
-        if choice.lower() == 'e':
-            name = input('Profile name to edit: ').strip()
-            if name not in config['profiles']:
-                print('Unknown profile.')
-                continue
-            edit(config, name)
-            save(root, config)
-            continue
         if choice in config['profiles']:
             return choice
         if choice.isdigit() and 1 <= int(choice) <= len(config['profiles']):
             return config['profiles'][int(choice) - 1]
-        print('Enter a listed number, profile name, a, e, or q.')
+        print('Enter a listed number, profile name, a, or q.')

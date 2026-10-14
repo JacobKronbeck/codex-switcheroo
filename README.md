@@ -101,43 +101,44 @@ Create the profile first, then sign into it. Do not sign out of your existing
 profile or rerun `add` for a name that already exists.
 
 ```bash
-bash ./switcheroo.sh add second-account --username "Second account" --email "other@example.com" --org "Personal"
+bash ./switcheroo.sh add second-account
 bash ./switcheroo.sh switch second-account
 ```
 
-In the browser sign-in flow, choose the other email. If the browser automatically
-selects your existing account, choose another account. Each profile requires its
-own initial sign-in on each computer; a subscription is associated with the
-account you sign into, not with the local profile label.
+Or run the daily command and select **a. Add a different account**. The only
+question is a local profile label, such as `second-account`. The new profile opens
+for sign-in; choose the other email in the browser login flow.
 
-You can also select **a. Add a different account** in the daily menu. It prompts
-for a profile name, username/display name, email and organization/workspace, then
-opens the new profile for initial sign-in. Select **e. Edit account details** to
-update the labels for existing profiles, or use:
+**Account information is captured automatically.** After opening a profile, a
+background helper watches for its first sign-in for up to five minutes, then
+stores the email and subscription plan returned by the local Codex app server.
+Every subsequent menu run and `list` refreshes account information as well. If
+sign-in takes longer, the next command still captures it. You never enter account
+email, username or organization into switcheroo.
 
-```bash
-bash ./switcheroo.sh edit personal --username "My name" --email "me@example.com" --org "Personal"
-bash ./switcheroo.sh edit work
-```
+The documented `account/read` endpoint provides **email and plan**, not display
+username or organization/workspace names. The menu uses the email as its account
+identifier and marks organization as unavailable rather than guessing. This is
+local cached Codex session information; it does not validate remote subscription
+entitlements or independently verify the Chat and Work surfaces.
 
-The second command prompts interactively. PowerShell accepts the same arguments
-through `./switcheroo.ps1`. Enter keeps an existing value; a command-line option
-with an empty string clears that field.
+The reader uses the Codex executable bundled with ChatGPT when found, otherwise
+`codex` on PATH. If necessary, configure a local `codex` executable path in the
+`config.json` shown by `doctor`, or provide `init --codex PATH` on a fresh install.
+No API key is needed. If the reader is unavailable, the menu reports that status
+and profile switching remains usable. Old manually entered details are ignored
+and replaced on refresh. Tokens and browser cookies are never parsed by this tool;
+Codex handles its own credentials and returns only account metadata.
 
-Menu entries show username, email and organization. These are **user-entered
-labels**, stored privately in the local config, not data retrieved from your
-ChatGPT account. Edit them if you sign into a different account within a profile.
-The tool never inspects tokens or browser cookies to discover identity.
+The detected open profile's **email is green** on interactive terminals when
+account metadata was successfully read. The switch menu captures which profile
+was open before closing the app and marks it `[was open]`. `list` marks it `[open]`.
+`[last opened]` means the last profile launched by this tool, not proof of a current
+login. Cached details are labeled when a read fails, and are not colored green.
+If multiple profiles are detected, no active-profile color is shown. `NO_COLOR`
+disables ANSI colors. Select by number or profile name, or press `q` to cancel.
 
-The detected open profile's username appears **green** on interactive terminals.
-The switch menu captures which profile was open before closing the app and marks
-it `[was open]`. `list` marks it `[open]`. `[last opened]` means the last profile
-launched by this tool, not proof of a current login. If no profile can be detected
-or multiple profiles are open, no current-profile color is shown. Noninteractive
-output and `NO_COLOR` disable ANSI colors; Windows uses virtual-terminal support
-when available. Select by number or profile name, or press `q` to cancel.
-
-To update a previously cloned installation without changing its local profiles:
+Update a previously cloned installation without changing its local profiles:
 
 ```bash
 git pull --ff-only
@@ -149,9 +150,8 @@ Append these arguments to either launcher:
 
 | Arguments | Behavior |
 | --- | --- |
-| `init [--app PATH]` | Create machine-local configuration |
-| `add NAME [--username VALUE --email VALUE --org VALUE]` | Register another profile with optional details |
-| `edit NAME [--username VALUE --email VALUE --org VALUE]` | Edit saved account labels |
+| `init [--app PATH] [--codex PATH]` | Create machine-local configuration |
+| `add NAME` | Register another profile; account metadata follows sign-in automatically |
 | `list` | Show account details and the detected open profile |
 | `doctor` | Show local state path and executable status |
 | `switch` | Close, check updates, prompt, launch |
@@ -179,7 +179,7 @@ from an independent terminal, because closing ChatGPT ends app-hosted work.
 
 Linux state defaults to `~/.local/share/codex-switcheroo` (or beneath
 `XDG_DATA_HOME`). Windows state is `%LOCALAPPDATA%\codex-switcheroo`.
-`config.json` contains the local executable path, profile labels, user-entered account details and last opened profile. Managed profile
+`config.json` contains the local executable path, profile labels, automatically captured account metadata and last opened profile. Managed profile
 state lives under `profiles/NAME/desktop` and `profiles/NAME/codex`.
 
 The launcher sets `CODEX_ELECTRON_USER_DATA_PATH`, `CODEX_HOME`, and
@@ -193,7 +193,7 @@ protection appropriate to your computer. Do not share profile directories
 between Fedora and Windows; encrypted app state can be bound to its OS/user.
 
 Machine-local paths belong in local `config.json`, never tracked configuration.
-No runtime credentials or real account state ship in this repository.
+Only allowlisted email/plan metadata is cached locally. The tool does not save raw app-server responses. No runtime credentials or real account state ship in this repository.
 
 ## Development
 

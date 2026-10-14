@@ -11,22 +11,22 @@ import switcheroo as s
 
 class AccountMenuTests(unittest.TestCase):
     def setUp(self):
-        self.config = {'app': '/fake/app', 'profiles': ['default', 'personal'], 'details': {'personal': {'username': 'Example User', 'email': 'user@example.test', 'org': 'Personal'}}}
+        self.config = {'app': '/fake/app', 'profiles': ['default', 'personal'], 'details': {'personal': {'source': 'app-server', 'status': 'signed-in', 'email': 'user@example.test', 'plan': 'pro'}}}
 
     def test_menu_shows_details_and_accepts_name(self):
         with patch('builtins.input', return_value='personal'), contextlib.redirect_stdout(io.StringIO()) as out:
             result = menu.choose(self.config, Path('/fake'), None, Mock(), s.valid_name)
         self.assertEqual(result, 'personal')
-        for value in ('Example User', 'user@example.test', 'Personal', 'Add a different account'):
+        for value in ('user@example.test', 'pro', 'Add a different account'):
             self.assertIn(value, out.getvalue())
 
     def test_add_from_menu_saves_then_selects(self):
         save = Mock()
-        with patch('builtins.input', side_effect=['a', 'second-account', 'Second User', 'second@example.test', 'Other org']), contextlib.redirect_stdout(io.StringIO()):
+        with patch('builtins.input', side_effect=['a', 'second-account']), contextlib.redirect_stdout(io.StringIO()):
             name = menu.choose(self.config, Path('/fake'), None, save, s.valid_name)
         self.assertEqual(name, 'second-account')
         self.assertIn(name, self.config['profiles'])
-        self.assertEqual(self.config['details'][name]['email'], 'second@example.test')
+        self.assertNotIn(name, self.config['details'])
         save.assert_called_once()
 
     def test_invalid_add_stays_in_menu(self):
@@ -35,7 +35,7 @@ class AccountMenuTests(unittest.TestCase):
 
     def test_cancelled_enrollment_does_not_save(self):
         save = Mock()
-        with patch('builtins.input', side_effect=['a', 'second-account', KeyboardInterrupt]), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+        with patch('builtins.input', side_effect=['a', KeyboardInterrupt]), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
             menu.choose(self.config, Path('/fake'), None, save, s.valid_name)
         save.assert_not_called()
         self.assertNotIn('second-account', self.config['profiles'])
@@ -62,7 +62,7 @@ class AccountMenuTests(unittest.TestCase):
     def test_only_open_profile_username_is_green(self):
         with patch.object(menu, 'green', side_effect=lambda v: '<green>' + v) as green, contextlib.redirect_stdout(io.StringIO()) as out:
             menu.show(self.config, 'personal', previous=True)
-        green.assert_called_once_with('Example User')
+        green.assert_called_once_with('user@example.test')
         self.assertIn('[was open]', out.getvalue())
 
     def test_active_profile_recognizes_managed_path(self):
@@ -84,7 +84,7 @@ class AccountMenuTests(unittest.TestCase):
         self.config.pop('details')
         with contextlib.redirect_stdout(io.StringIO()) as out:
             menu.show(self.config)
-        self.assertIn('Username not set', out.getvalue())
+        self.assertIn('Waiting for first sign-in', out.getvalue())
 
 
 if __name__ == '__main__':

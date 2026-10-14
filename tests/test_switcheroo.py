@@ -22,6 +22,12 @@ class SwitchTests(unittest.TestCase):
         self.config = {'app': str(self.app), 'profiles': ['default', 'work']}
         s.private_dir(self.root)
         s.save_config(self.root, self.config)
+        reader = patch.object(s.account_identity, 'refresh')
+        watcher = patch.object(s, 'start_identity_watch')
+        reader.start()
+        watcher.start()
+        self.addCleanup(reader.stop)
+        self.addCleanup(watcher.stop)
 
     def test_profiles_keep_separate_homes(self):
         command, env = s.launch_spec(self.config, self.root, 'work')

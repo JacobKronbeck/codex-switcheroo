@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import account_menu
+import account_identity
 
 
 class SwitchError(ValueError):
@@ -195,19 +196,52 @@ def choose_profile(config, root, active=None):
     return account_menu.choose(config, root, active, save_config, valid_name)
 
 
+def start_identity_watch(profile):
+    try:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_watch', profile],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=(os.name != 'nt'),
+                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0)
+    except OSError:
+        print('Background account capture unavailable; details will refresh next time.', file=sys.stderr)
+
+
+def watch_identity(root, profile, duration=300):
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        try:
+            with locked(root):
+                config = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+                if profile not in config['profiles'] or config.get('last_opened') != profile:
+                    return
+            # Probe outside the lock so sign-in and other commands remain usable.
+            account_identity.refresh(config, root, launch_spec, only=[profile])
+            metadata = config['details'][profile]
+            if metadata.get('status') == 'signed-in':
+                with locked(root):
+                    current = json.loads((root / 'config.json').read_text(encoding='utf-8'))
+                    if profile not in current['profiles'] or current.get('last_opened') != profile:
+                        return
+                    current.setdefault('details', {})[profile] = metadata
+                    save_config(root, current)
+                return
+        except (OSError, ValueError, KeyError):
+            pass
+        time.sleep(5)
+
+
 def main(argv=None):
+    arguments = sys.argv[1:] if argv is None else argv
+    if len(arguments) == 2 and arguments[0] == '_watch':
+        watch_identity(state_root(), arguments[1])
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action')
     init = sub.add_parser('init', help='Discover app and create local configuration')
     init.add_argument('--app', help='Path to ChatGPT executable')
+    init.add_argument('--codex', help='Optional Codex CLI executable for automatic account details')
     add = sub.add_parser('add', help='Register an empty account profile; switch to it to sign in once')
     add.add_argument('name')
-    for field in ('username', 'email', 'org'):
-        add.add_argument('--' + field, help='Optional account detail for the menu')
-    edit = sub.add_parser('edit', help='Set account username, email and organization labels')
-    edit.add_argument('name')
-    for field in ('username', 'email', 'org'):
-        edit.add_argument('--' + field)
     sub.add_parser('list', help='Show account details and currently open profile')
     sub.add_parser('doctor', help='Print paths and executable status, without opening profile data')
     switch = sub.add_parser('switch', help='Close, check updates, select and open')
@@ -215,7 +249,7 @@ def main(argv=None):
     switch.add_argument('--skip-updates', action='store_true')
     switch.add_argument('--install-updates', action='store_true')
     switch.add_argument('--dry-run', action='store_true')
-    args = parser.parse_args(['switch'] if not argv and len(sys.argv) == 1 else argv)
+    args = parser.parse_args(arguments or ['switch'])
     root = state_root()
     with locked(root):
         path = root / 'config.json'
@@ -225,7 +259,10 @@ def main(argv=None):
             app = str(Path(args.app).expanduser().resolve()) if args.app else discover_app()
             if not Path(app).is_file():
                 raise SwitchError('App executable does not exist.')
-            save_config(root, {'app': app, 'profiles': ['default']})
+            config = {'app': app, 'profiles': ['default']}
+            if args.codex:
+                config['codex'] = str(Path(args.codex).expanduser().resolve())
+            save_config(root, config)
             print('Initialized. default opens your existing app account. Use add NAME for another account.')
             return
         if not path.exists():
@@ -237,20 +274,18 @@ def main(argv=None):
             if name in profiles:
                 raise SwitchError('Profile already exists.')
             profiles.append(name)
-            if any(getattr(args, field) is not None for field in ('username', 'email', 'org')):
-                account_menu.edit(config, name, args)
             save_config(root, config)
             print(f'Added {name}. Run switch {name} and sign into this profile once.')
-        elif args.action == 'edit':
-            if args.name not in profiles:
-                raise SwitchError('Unknown profile. Use list or add NAME.')
-            account_menu.edit(config, args.name, args)
-            save_config(root, config)
-            print('Saved account labels. These do not change your app login.')
         elif args.action == 'list':
+            account_identity.refresh(config, root, launch_spec)
+            save_config(root, config)
             account_menu.show(config, active_profile(config, root))
         elif args.action == 'doctor':
             print(f'Local state: {root}\nApp: {config["app"]}\nExecutable exists: {Path(config["app"]).is_file()}')
+            try:
+                print('Account reader: ' + account_identity.discover(config))
+            except account_identity.IdentityUnavailable:
+                print('Account reader unavailable. Install Codex CLI or set codex in this local config.')
             print('Profile isolation uses internal app settings; Windows and live sign-in still require manual validation.')
         elif args.action == 'switch':
             if args.profile and args.profile not in profiles:
@@ -269,6 +304,8 @@ def main(argv=None):
             close_app(config['app'])
             if not args.skip_updates:
                 check_updates(args.install_updates)
+            account_identity.refresh(config, root, launch_spec)
+            save_config(root, config)
             selected = args.profile or choose_profile(config, root, active)
             if selected is None:
                 return
@@ -279,7 +316,8 @@ def main(argv=None):
                 raise SwitchError('Could not launch the app. Run doctor and check the configured executable.') from exc
             config['last_opened'] = selected
             save_config(root, config)
-            print(f'Opened profile {selected}. Verify the account in the app; sign in if requested.')
+            start_identity_watch(selected)
+            print(f'Opened profile {selected}. Sign in if requested; account details are captured automatically.')
         else:
             parser.print_help()
 
