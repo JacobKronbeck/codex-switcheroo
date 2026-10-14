@@ -10,6 +10,12 @@ timeouts, early/unrelated notifications, helper cleanup, duplicate reuse,
 immediate launch, configuration compatibility, profile isolation, update-install
 refusal and preservation of running windows.
 
+The latest run passes all 83 tests. Additional coverage checks Ctrl+C quits
+without another refresh (including enrollment cleanup), saved label editing and
+removal across refresh/restart, and Docker page refresh/back/quit navigation,
+inactive-service exit codes, missing commands and unsupported platforms.
+Docker subprocess execution is mocked and checks the rootless user service without sudo.
+
 These tests establish command and protocol behavior, not live desktop compatibility.
 
 ## Outstanding manual desktop checks
@@ -40,8 +46,12 @@ Run on both Fedora and Windows using an independent terminal:
    remain open and the selected profile must retain its login.
 8. Quit the picker, abort browser login with b, and let an enrollment time out. Confirm
    all original windows remain running and no new visible account is saved.
-9. Add an already saved email. Confirm reuse of the original profile without a
-   duplicate row. Test case differences and an expired existing session.
+9. Add the same email with a different workspace selected in browser consent.
+   Give it a workspace label. Confirm a separate numbered row and isolated window,
+   and select both rows to verify each opens the intended workspace. Add the same
+   email and workspace again: when the helper reports workspace IDs, confirm reuse
+   of the original profile. Without IDs, confirm separate rows instead of email-only
+   merging. Test case differences, expired sessions, and label retention after refresh.
 10. Sign out from one saved account. Confirm its row remains with Sign-in required
     and no green indicator. Open and sign in again; confirm status recovers.
 11. Temporarily make the Codex reader unavailable. Confirm cached account emails
@@ -57,6 +67,13 @@ Run on both Fedora and Windows using an independent terminal:
     browser sign-in. Confirm background capture and separate list commands can
     operate while the picker waits for input.
 16. Test Windows Store executable discovery/direct launch and both shell wrappers.
+17. Press Ctrl+C at the picker, during browser login, and while editing a label.
+    Confirm the script exits without refreshing and existing windows stay open.
+18. Use e to select an account and edit its label. Refresh and restart the picker;
+    confirm the new label persists. Repeat with blank input to remove the label.
+19. On Fedora, use d to view Docker Status. Confirm the rootless user service is
+    queried without sudo or a password prompt. Check active
+    and inactive service output, r to refresh, b to return, and q/Ctrl+C to quit.
 
 Never include tokens, profile contents or raw authentication responses in reports.
 Live browser authentication, account isolation, activation, Windows Store launch

@@ -12,6 +12,29 @@ import switcheroo as s
 
 
 class IdentityTests(unittest.TestCase):
+    def test_workspace_metadata_is_allowlisted(self):
+        data = identity.normalize({'account': {'type': 'chatgpt', 'email': 'user@example.test'},
+                                   'workspaceRouting': {'chatgptAccountId': 'workspace-1',
+                                                        'accessToken': 'FAKE_SECRET', 'backendOrigin': 'ignored'}})
+        self.assertEqual(data['workspace_id'], 'workspace-1')
+        self.assertNotIn('FAKE_SECRET', json.dumps(data))
+        self.assertNotIn('backendOrigin', data)
+        for routing in (None, 'invalid', {}, {'chatgptAccountId': '\ninvalid'}, {'chatgptAccountId': 42}):
+            data = identity.normalize({'account': {'type': 'chatgpt'}, 'workspaceRouting': routing})
+            self.assertNotIn('workspace_id', data)
+
+    def test_workspace_details_survive_logout_and_reader_failure(self):
+        previous = {'source': 'app-server', 'status': 'signed-in', 'email': 'user@example.test',
+                    'workspace_id': 'work', 'workspace_label': 'Alliant Engineering'}
+        for status in ('signed-out', 'unavailable'):
+            data = identity.remembered(previous, {'source': 'app-server', 'status': status})
+            self.assertEqual(data['workspace_id'], 'work')
+            self.assertEqual(data['workspace_label'], 'Alliant Engineering')
+        changed = identity.remembered(previous, dict(previous, workspace_id='personal', workspace_label=''))
+        self.assertFalse(changed.get('workspace_label'))
+        fresh = identity.remembered(previous, {'source': 'app-server', 'status': 'signed-in', 'email': 'user@example.test'})
+        self.assertNotIn('workspace_id', fresh)
+
     def test_only_email_and_plan_are_captured(self):
         data = identity.normalize({'account': {'type': 'chatgpt', 'email': 'user@example.test', 'planType': 'pro', 'accessToken': 'FAKE_SECRET', 'refreshToken': 'FAKE_SECRET', 'username': 'unsupported'}})
         self.assertEqual(data, {'source': 'app-server', 'status': 'signed-in', 'type': 'chatgpt', 'email': 'user@example.test', 'plan': 'pro'})

@@ -52,6 +52,10 @@ def normalize(result):
         value = account.get(key)
         if isinstance(value, str):
             metadata[output] = ''.join(c for c in value if c.isprintable())[:160]
+    routing = result.get('workspaceRouting')
+    workspace = routing.get('chatgptAccountId') if isinstance(routing, dict) else None
+    if isinstance(workspace, str) and 0 < len(workspace) <= 160 and workspace.isprintable():
+        metadata['workspace_id'] = workspace
     return metadata
 
 
@@ -120,7 +124,8 @@ class Session:
         return message['result']
 
     def initialize(self):
-        self.request(1, 'initialize', {'clientInfo': {'name': 'codex_switcheroo', 'version': '0.3.0'}})
+        self.request(1, 'initialize', {'clientInfo': {'name': 'codex_switcheroo', 'version': '0.3.0'},
+                                       'capabilities': {'experimentalApi': True}})
         self.send({'method': 'initialized'})
 
     def close(self):
@@ -200,6 +205,15 @@ def remembered(previous, metadata):
         metadata['confirmed'] = True
         if not metadata.get('email') and previous.get('email'):
             metadata['email'] = previous['email']
+        same_email = metadata.get('email', '').casefold() == previous.get('email', '').casefold()
+        same_workspace = (not metadata.get('workspace_id') or not previous.get('workspace_id')
+                          or metadata.get('workspace_id') == previous.get('workspace_id'))
+        if same_email and same_workspace:
+            for key in ('workspace_id', 'workspace_label'):
+                if key == 'workspace_id' and metadata.get('status') == 'signed-in':
+                    continue  # A fresh response without an ID cannot prove workspace identity.
+                if previous.get(key) and not metadata.get(key):
+                    metadata[key] = previous[key]
     if metadata.get('status') == 'signed-in':
         metadata['confirmed'] = True
     return metadata
@@ -222,6 +236,6 @@ def refresh(config, root, launch_spec, only=None):
             except IdentityUnavailable:
                 previous = config.get('details', {}).get(name, {})
                 # Keep only earlier automatic metadata, explicitly marked stale.
-                metadata = {key: previous[key] for key in ('source', 'status', 'type', 'email', 'plan') if key in previous} if previous.get('source') == 'app-server' else {}
+                metadata = {key: previous[key] for key in ('source', 'status', 'type', 'email', 'plan', 'workspace_id', 'workspace_label') if key in previous} if previous.get('source') == 'app-server' else {}
                 metadata.update(source='app-server', status='unavailable')
         config.setdefault('details', {})[name] = remembered(config.get('details', {}).get(name, {}), metadata)

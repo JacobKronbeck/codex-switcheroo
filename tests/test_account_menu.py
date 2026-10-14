@@ -10,6 +10,19 @@ import switcheroo as s
 
 
 class AccountMenuTests(unittest.TestCase):
+    def test_same_email_workspaces_have_separate_numbers_and_open_status(self):
+        config = {'profiles': ['work', 'personal'], 'details': {
+            name: {'source': 'app-server', 'status': 'signed-in', 'email': 'user@example.test',
+                   'workspace_label': label} for name, label in [('work', 'Alliant Engineering'), ('personal', 'Personal account')]}}
+        with patch.object(menu, 'green', side_effect=lambda value: value), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(menu.show(config, {'personal'}), ['work', 'personal'])
+        self.assertIn('1. user@example.test — Alliant Engineering', out.getvalue())
+        self.assertIn('2. ● user@example.test — Personal account', out.getvalue())
+        with patch('builtins.input', side_effect=['2', 'q']), contextlib.redirect_stdout(io.StringIO()):
+            opened = Mock()
+            menu.choose(config, Mock(return_value=set()), Mock(), opened)
+        opened.assert_called_once_with('personal')
+
     def setUp(self):
         self.config = {'app': '/fake/app', 'profiles': ['default', 'personal'], 'details': {'personal': {'source': 'app-server', 'status': 'signed-in', 'email': 'user@example.test', 'plan': 'pro'}}}
 
@@ -142,10 +155,66 @@ class AccountMenuTests(unittest.TestCase):
             menu.choose(self.config, Mock(return_value=set()), Mock(), Mock(side_effect=ValueError('Cannot open')))
         self.assertIn('Cannot open', out.getvalue())
 
-    def test_ctrl_c_at_picker_does_not_quit(self):
-        with patch('builtins.input', side_effect=[KeyboardInterrupt(), 'q']), contextlib.redirect_stdout(io.StringIO()) as out:
-            menu.choose(self.config, Mock(return_value=set()), Mock(), Mock())
-        self.assertIn('Use q to quit', out.getvalue())
+    def test_ctrl_c_at_picker_quits_without_refreshing(self):
+        refresh = Mock(return_value=set())
+        with patch('builtins.input', side_effect=KeyboardInterrupt()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(menu.choose(self.config, refresh, Mock(), Mock()))
+        refresh.assert_called_once_with()
+
+    def test_ctrl_c_during_actions_quits_without_refreshing(self):
+        for choice, callback in [('a', 'enroll'), ('1', 'open'), ('e', 'edit'), ('d', 'docker')]:
+            with self.subTest(choice=choice):
+                refresh = Mock(return_value=set())
+                enroll = Mock(side_effect=KeyboardInterrupt() if callback == 'enroll' else None)
+                opened = Mock(side_effect=KeyboardInterrupt() if callback == 'open' else None)
+                inputs = [choice, KeyboardInterrupt()]
+                with patch('builtins.input', side_effect=inputs), patch.object(menu.subprocess, 'run'), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertIsNone(menu.choose(self.config, refresh, enroll, opened, Mock()))
+                refresh.assert_called_once_with()
+
+    def test_ctrl_c_during_refresh_quits(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(menu.choose(self.config, Mock(side_effect=KeyboardInterrupt()), Mock(), Mock()))
+
+    def test_edit_selects_account_sanitizes_label_and_can_remove_it(self):
+        for label, expected in [('Personal\n\033', 'Personal'), ('', '')]:
+            with self.subTest(label=label):
+                save_label, opened = Mock(), Mock()
+                with patch('builtins.input', side_effect=['e', '99', '1', label, 'q']), contextlib.redirect_stdout(io.StringIO()):
+                    menu.choose(self.config, Mock(return_value=set()), Mock(), opened, save_label)
+                save_label.assert_called_once_with('personal', expected)
+                opened.assert_not_called()
+
+    def test_edit_back_and_quit_do_not_save(self):
+        for inputs, count in [(['e', 'b', 'q'], 2), (['e', 'q'], 1)]:
+            save_label, refresh = Mock(), Mock(return_value=set())
+            with patch('builtins.input', side_effect=inputs), contextlib.redirect_stdout(io.StringIO()):
+                menu.choose(self.config, refresh, Mock(), Mock(), save_label)
+            save_label.assert_not_called()
+            self.assertEqual(refresh.call_count, count)
+
+    def test_docker_status_refresh_back_and_quit(self):
+        for inputs, count, refresh_count in [(['d', 'r', 'b', 'q'], 2, 2), (['d', 'q'], 1, 1)]:
+            refresh = Mock(return_value=set())
+            with patch.object(menu.sys, 'platform', 'linux'), patch.object(menu.subprocess, 'run', return_value=Mock(returncode=3)) as run, patch('builtins.input', side_effect=inputs), contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.choose(self.config, refresh, Mock(), Mock())
+            self.assertEqual(run.call_count, count)
+            run.assert_called_with(['systemctl', '--user', '--no-pager', 'status', 'docker'], check=False)
+            self.assertEqual(refresh.call_count, refresh_count)
+            self.assertIn('Docker Status', out.getvalue())
+            self.assertIn('systemctl --user --no-pager status docker', out.getvalue())
+            self.assertNotIn('sudo', out.getvalue())
+            self.assertIn('exited with code 3', out.getvalue())
+
+    def test_docker_unavailable_and_unsupported_allow_back(self):
+        for platform in ['linux', 'win32']:
+            with patch.object(menu.sys, 'platform', platform), patch.object(menu.subprocess, 'run', side_effect=FileNotFoundError('systemctl unavailable')) as run, patch('builtins.input', side_effect=['b']), contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.docker_status()
+            if platform == 'linux':
+                self.assertIn('systemctl unavailable', out.getvalue())
+            else:
+                run.assert_not_called()
+                self.assertIn('requires Linux', out.getvalue())
 
     def test_interactive_terminal_clears_screen(self):
         with patch.object(menu.os, 'name', 'posix'), patch.object(menu.sys.stdout, 'isatty', return_value=True), patch.dict(menu.os.environ, {'TERM': 'xterm'}), patch('builtins.print') as printed:
