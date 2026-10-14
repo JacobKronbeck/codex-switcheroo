@@ -2,11 +2,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
-@unittest.skipUnless(shutil.which('bash') and shutil.which('timeout') and shutil.which('git'),
+@unittest.skipUnless(sys.platform == 'linux' and shutil.which('bash') and shutil.which('timeout') and shutil.which('git'),
                      'Linux launcher tools required')
 class DesktopLauncherTests(unittest.TestCase):
     def setUp(self):
