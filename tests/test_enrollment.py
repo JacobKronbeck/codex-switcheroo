@@ -34,18 +34,37 @@ class EnrollmentTests(unittest.TestCase):
         self.assertIn(name, json.loads((self.root / 'config.json').read_text())['profiles'])
 
     def test_failed_cancelled_and_timed_out_enrollment_do_not_register(self):
-        for error in (identity.IdentityUnavailable('failed'), identity.IdentityUnavailable('timed out'), KeyboardInterrupt()):
+        for error in (identity.IdentityUnavailable('failed'), identity.IdentityUnavailable('timed out')):
             with patch.object(identity, 'discover', return_value='fake'), patch.object(identity, 'login', side_effect=error), contextlib.redirect_stdout(io.StringIO()):
                 self.assertIsNone(s.enroll_account(self.config, self.root, 'new'))
             self.assertEqual(self.config['profiles'], ['default'])
             self.assertFalse((self.root / 'profiles/new').exists())
 
-    def test_duplicate_email_reuses_existing_account(self):
+    def test_duplicate_workspace_reuses_existing_account(self):
+        self.metadata['workspace_id'] = 'workspace-1'
         self.config['details'] = {'default': dict(self.metadata, email='NEW@example.test')}
         with patch.object(identity, 'discover', return_value='fake'), patch.object(identity, 'login', return_value=dict(self.metadata)), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(s.enroll_account(self.config, self.root, 'new'), 'default')
         self.assertEqual(self.config['profiles'], ['default'])
         self.assertFalse((self.root / 'profiles/new').exists())
+
+    def test_same_email_different_or_unknown_workspace_keeps_new_profile(self):
+        for existing_id, new_id in [('work', 'personal'), (None, 'personal'), ('work', None), (None, None)]:
+            with self.subTest(existing_id=existing_id, new_id=new_id), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = dict(self.config, profiles=['default'], details={
+                    'default': dict(self.metadata, workspace_id=existing_id)})
+                metadata = dict(self.metadata, workspace_id=new_id)
+                with patch.object(identity, 'discover', return_value='fake'), patch.object(identity, 'login', return_value=metadata), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(s.enroll_account(config, root, 'new', workspace='Personal account'), 'new')
+                self.assertEqual(config['profiles'], ['default', 'new'])
+                self.assertTrue((root / 'profiles/new/codex').is_dir())
+                self.assertEqual(config['details']['new']['workspace_label'], 'Personal account')
+
+    def test_interactive_enrollment_offers_workspace_label(self):
+        with patch.object(identity, 'discover', return_value='fake'), patch.object(identity, 'login', return_value=dict(self.metadata)), patch.object(s.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='Alliant Engineering'), contextlib.redirect_stdout(io.StringIO()):
+            name = s.enroll_account(self.config, self.root)
+        self.assertEqual(self.config['details'][name]['workspace_label'], 'Alliant Engineering')
 
     def test_open_refreshes_then_activates_without_duplicate_launch(self):
         with patch.object(s, 'refresh_accounts', return_value={'default'}) as refresh, patch.object(s, 'activate_profile', return_value=True) as activate, patch.object(s.subprocess, 'Popen') as launch, patch.object(s, 'close_app') as close, contextlib.redirect_stdout(io.StringIO()):
@@ -218,6 +237,26 @@ send({'id':3,'result':{'account':{'type':'chatgpt','email':'new@example.test','a
             return 'q'
         with patch.object(s, 'state_root', return_value=self.root), patch.object(identity, 'refresh'), patch.object(s, 'open_profiles', return_value=set()), patch('builtins.input', side_effect=answer), contextlib.redirect_stdout(io.StringIO()):
             s.main(['switch', '--skip-updates'])
+
+    def test_ctrl_c_enrollment_propagates_and_removes_unregistered_profile(self):
+        with patch.object(identity, 'discover', return_value='fake'), patch.object(identity, 'login', side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            s.enroll_account(self.config, self.root, 'new')
+        self.assertEqual(self.config['profiles'], ['default'])
+        self.assertFalse((self.root / 'profiles/new').exists())
+
+    def test_picker_label_edits_persist_after_refresh_and_restart(self):
+        self.config['details'] = {'default': dict(self.metadata, workspace_id='workspace-1')}
+        s.save_config(self.root, self.config)
+        def refresh(config, root, launch):
+            config['details']['default'] = identity.remembered(config['details']['default'], dict(self.metadata, workspace_id='workspace-1'))
+        for label in ['My workspace', '']:
+            with patch.object(identity, 'refresh', side_effect=refresh), patch.object(s, 'open_profiles', return_value=set()), patch('builtins.input', side_effect=['e', '1', label, 'r', 'q']), contextlib.redirect_stdout(io.StringIO()):
+                s.choose_profile(self.config, self.root)
+            saved = json.loads((self.root / 'config.json').read_text())
+            self.assertEqual(saved['details']['default'].get('workspace_label', ''), label)
+            self.assertEqual(saved['details']['default']['email'], self.metadata['email'])
+            self.assertEqual(saved['details']['default']['workspace_id'], 'workspace-1')
+            self.config = saved
 
     def test_protocol_back_cancels_and_cleans_up_helper(self):
         import account_menu

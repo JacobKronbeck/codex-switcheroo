@@ -16,7 +16,10 @@ push or publication was performed.
 - Keep all account windows running. Detect all open profiles, and activate existing
   windows using OS APIs when available; never launch duplicates for known-open
   profiles. Linux Wayland environments may require manual window selection.
-- Duplicate enrollment reuses the original saved profile by case-insensitive email.
+- Duplicate enrollment reuses the original saved profile only with matching
+  case-insensitive email and known workspace ID. Same-email workspaces have separate
+  numbered entries; unknown workspace IDs never trigger email-only merging.
+  Interactive enrollment offers an optional display label; CLI supports --workspace.
   Expired original sessions may still need sign-in in their desktop window.
 - Preserve confirmed identities through logout and reader failures, with explicit
   status and no green indicator. Keep profile names for direct legacy commands.
@@ -41,6 +44,14 @@ keeps a single action message, and provides r Refresh, b Back and q Quit. Back a
 home redraws the home picker; Back during browser login cancels only that enrollment.
 Quit during login cancels enrollment and exits. Terminal EOF still ends the script.
 State locks are scoped to refresh/enrollment/open actions, not waiting for input.
+
+Ctrl+C now exits like q, including during refresh, enrollment, editing and Docker
+status. The e action selects an account and saves or removes its workspace_label
+under a short state lock; refresh/restart preserves the label for the same identity.
+The d action opens Docker Status on Linux using systemctl --user --no-pager status
+docker for the rootless user service, without sudo. It provides r, b
+and q navigation and displays nonzero status exit codes. All 83 tests pass;
+Automated Docker execution is mocked; live user-service status is a separate check.
 
 The installed Fedora configuration points to codex-launcher, which execs the
 sibling ChatGPT binary. Process detection now includes that exact sibling path;

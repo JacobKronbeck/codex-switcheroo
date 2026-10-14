@@ -227,7 +227,7 @@ def refresh_accounts(config, root):
     return open_profiles(config, root, windows_only=True)
 
 
-def enroll_account(config, root, name=None):
+def enroll_account(config, root, name=None, workspace=None):
     name = valid_name(name) if name else 'account-' + uuid.uuid4().hex[:12]
     if name == 'default' or name in config['profiles'] or (root / 'profiles' / name).exists():
         raise SwitchError('Profile already exists. Select it with switch PROFILE.')
@@ -245,20 +245,27 @@ def enroll_account(config, root, name=None):
         metadata['confirmed'] = True
         email = metadata.get('email', '').casefold()
         for existing in account_menu.accounts(config):
-            if email and config['details'][existing].get('email', '').casefold() == email:
-                print('That account is already saved. Using the existing account.')
+            detail = config['details'][existing]
+            if (email and detail.get('email', '').casefold() == email
+                    and metadata.get('workspace_id')
+                    and metadata['workspace_id'] == detail.get('workspace_id')):
+                print('That workspace is already saved. Using the existing account.')
                 return existing
+        if workspace is None and sys.stdin.isatty():
+            workspace = input('Workspace label (optional, e.g. Personal account or Alliant Engineering): ')
+        if workspace and account_menu.clean(workspace):
+            metadata['workspace_label'] = account_menu.clean(workspace)
         config['profiles'].append(name)
         config.setdefault('details', {})[name] = metadata
         save_config(root, config)
         registered = True
         print('Account added: ' + (metadata.get('email') or 'ChatGPT account'))
         return name
-    except (account_identity.IdentityUnavailable, KeyboardInterrupt, OSError) as error:
+    except (account_identity.IdentityUnavailable, OSError) as error:
         if not registered and name in config['profiles']:
             config['profiles'].remove(name)
             config.get('details', {}).pop(name, None)
-        print('Sign-in cancelled.' if isinstance(error, KeyboardInterrupt) else str(error))
+        print(str(error))
         return None
     finally:
         if name not in config['profiles'] and base.exists():
@@ -288,7 +295,19 @@ def choose_profile(config, root, active=None):
                 raise SwitchError('Account no longer exists. Refresh and select again.')
             return open_account(config, root, selected)
 
-    return account_menu.choose(config, refresh, enroll, open_selected)
+    def save_label(selected, label):
+        with locked(root):
+            reload_config()
+            if selected not in account_menu.accounts(config):
+                raise SwitchError('Account no longer exists. Refresh and select again.')
+            detail = config['details'][selected]
+            if label:
+                detail['workspace_label'] = account_menu.clean(label)
+            else:
+                detail.pop('workspace_label', None)
+            save_config(root, config)
+
+    return account_menu.choose(config, refresh, enroll, open_selected, save_label)
 
 
 def activate_profile(config, root, profile):
@@ -408,6 +427,7 @@ def main(argv=None):
     init.add_argument('--codex', help='Optional Codex CLI executable for automatic account details')
     add = sub.add_parser('add', help='Sign in through your browser and open the account')
     add.add_argument('name', nargs='?', help='Optional legacy internal profile name')
+    add.add_argument('--workspace', help='Display label for the workspace selected in browser sign-in')
     sub.add_parser('list', help='Show account details and currently open profile')
     sub.add_parser('doctor', help='Print paths and executable status, without opening profile data')
     switch = sub.add_parser('switch', help='Select and open an account, keeping existing windows open')
@@ -441,7 +461,7 @@ def main(argv=None):
                 raise SwitchError('App executable moved or was removed. Run doctor.')
             refresh_accounts(config, root)
             try:
-                selected = enroll_account(config, root, args.name)
+                selected = enroll_account(config, root, args.name, workspace=args.workspace)
             except account_menu.QuitRequested:
                 return
             except account_menu.BackRequested:
@@ -493,6 +513,8 @@ if __name__ == '__main__':
     except (SwitchError, OSError, ValueError, KeyError) as error:
         print(f'Error: {error}', file=sys.stderr)
         sys.exit(1)
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt:
+        print()
+    except EOFError:
         print('\nCancelled. Existing account windows remain open.', file=sys.stderr)
         sys.exit(130)

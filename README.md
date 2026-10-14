@@ -3,6 +3,7 @@
 ### A simple codex account switcher for your chatgpt app. All in the terminal.
 
 Choose a saved ChatGPT account by email, or add one through browser sign-in.
+Different workspaces under the same email can be saved as separate numbered choices.
 Each managed account has its own desktop data and Codex home. Other account
 windows stay open when you select an account or quit the picker. The picker stays
 running after actions and redraws the terminal instead of appending a scrolling log.
@@ -73,10 +74,12 @@ ChatGPT accounts
   No accounts
   Add an account to get started.
   a. Add account
+  e. Edit account label
+  d. Docker Status
   r. Refresh
   b. Back
   q. Quit
-Choose account number, a, r, b, or q:
+Choose account number, a, e, d, r, b, or q:
 ```
 
 A signed-in account in the original app profile is discovered automatically.
@@ -89,6 +92,8 @@ ChatGPT accounts
   1. ● first@example.test [open]
   2. second@example.test
   a. Add account
+  e. Edit account label
+  d. Docker Status
   r. Refresh
   b. Back
   q. Quit
@@ -115,23 +120,37 @@ The picker reports a reopen request because a running process alone cannot
 confirm that a visible window exists.
 Account and process status refresh before each picker display and before opening.
 After a selection, the picker stays running. Press **r** to refresh, **b** to
-return to the home screen, or **q** to quit. Account windows keep running.
-Pressing Ctrl+C at the picker reminds you to use q instead of exiting. Screen
+return to the home screen, or **q** or **Ctrl+C** to quit. Account windows keep running.
+Ctrl+C also quits during enrollment, editing, refresh, or Docker status. Screen
 clearing applies to interactive terminals; redirected output remains plain text.
+
+Press **e** to select an account and edit the label after its email. Enter a blank
+label to remove it. Labels are saved locally and retained across refreshes and
+restarts for the same account/workspace.
+
+Press **d** for **Docker Status** on Linux. This runs `systemctl --user --no-pager
+status docker` for rootless Docker under your user account, without sudo. The page displays the
+command output, including inactive or failed service status; **r** reruns it,
+**b** returns to accounts, and **q** or **Ctrl+C** quits.
 
 Previously confirmed accounts stay visible after logout or a metadata-reader
 failure, marked **Sign-in required** or **Status unavailable**, without green.
 Select an expired account to open its app window and sign in again if requested.
-Emails serve as usernames; plan details, internal profile labels and organization
-information are omitted from the picker. If email is unavailable, a generic
-ChatGPT account label is shown.
+Emails serve as usernames. Optional workspace labels distinguish choices such as
+`user@example.test — Alliant Engineering` and `user@example.test — Personal account`.
+Same-email entries without labels (or with identical labels) include a Workspace
+number to distinguish them. Plan details and internal profile names stay hidden.
+If email is unavailable, a generic ChatGPT account label is shown.
 
 ## Add account
 
 Select **a. Add account**, or run `add` using either launcher. No account name or
 email entry is required. An isolated internal profile is generated, and the
 Codex helper starts browser authentication and owns the local callback. Choose
-the intended account in the browser. If automatic browser opening fails, the
+the intended account and workspace in the browser. After sign-in, the interactive
+terminal offers an optional workspace label, such as **Alliant Engineering** or
+**Personal account**. This label describes your choice; it does not select the
+workspace in the browser. If automatic browser opening fails, the
 terminal prints the login URL. During sign-in, enter **b** to return to the
 picker or **q** to quit (press Enter after the key).
 
@@ -139,9 +158,17 @@ The tool waits up to five minutes. Ctrl+C cancels enrollment and returns to the
 picker. Failed, cancelled or timed-out enrollment creates no visible account and
 removes only its newly created, unregistered directory. Successful login is
 confirmed through `account/read`, saved, and immediately opens that account's
-window. A duplicate email reuses the existing saved account and discards the new
-profile. If the existing account's session has expired, its window may request
-sign-in again.
+window. To save another workspace for the same email, choose **a. Add account**
+again and select that workspace during browser consent. Each workspace gets its
+own isolated profile and numbered choice.
+
+When Codex reports a workspace ID, the same email and workspace ID reuse the
+existing saved profile. Different workspace IDs remain separate. Older helpers or
+sessions that do not expose the ID keep new logins as separate entries, since an
+email alone cannot identify the workspace. Workspace IDs are read through the
+app-server's experimental metadata capability; credentials are never decoded.
+If an existing reused profile's session has expired, its window may request sign-in again.
+For a label from the command line, use `add --workspace "Personal account"`.
 
 Accounts must be signed in once on each computer. Valid cached sessions should
 avoid repeated authentication; expiration, revocation, or organization policies
@@ -156,7 +183,7 @@ Append arguments to `bash ./switcheroo.sh` or `.\switcheroo.ps1`:
 | Arguments | Behavior |
 | --- | --- |
 | `init [--app PATH] [--codex PATH]` | Create local configuration |
-| `add [NAME]` | Browser sign-in, save confirmed account, open window, continue in picker; NAME is an optional legacy internal identifier |
+| `add [NAME] [--workspace LABEL]` | Browser sign-in, save confirmed workspace, open window, continue in picker; NAME is an optional legacy internal identifier |
 | `list` | Refresh and show confirmed accounts and open indicators |
 | `doctor` | Show state path and executable status |
 | `switch` (also the default) | Check updates, show picker, open or activate selection |
@@ -180,7 +207,8 @@ and update-install protection.
 Linux state lives under `~/.local/share/codex-switcheroo`, or `XDG_DATA_HOME`.
 Windows uses `%LOCALAPPDATA%\codex-switcheroo`. Local `config.json` stores the
 executable path, internal profile identifiers, allowlisted account metadata and
-confirmation status. Existing configs and profile paths remain compatible.
+confirmation status, workspace IDs when available, and optional workspace labels.
+Existing configs and profile paths remain compatible.
 Legacy `last_opened` is retained for compatibility but never displayed as status.
 
 Managed data lives under `profiles/NAME/desktop` and `profiles/NAME/codex`.
