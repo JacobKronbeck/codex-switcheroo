@@ -95,6 +95,54 @@ profiles start fresh; project source files can still be opened from shared disk
 locations. Native Windows and WSL Codex homes are separate; WSL integration is
 not covered by this version.
 
+## Add an account with a different email
+
+Create the profile first, then sign into it. Do not sign out of your existing
+profile or rerun `add` for a name that already exists.
+
+```bash
+bash ./switcheroo.sh add second-account --username "Second account" --email "other@example.com" --org "Personal"
+bash ./switcheroo.sh switch second-account
+```
+
+In the browser sign-in flow, choose the other email. If the browser automatically
+selects your existing account, choose another account. Each profile requires its
+own initial sign-in on each computer; a subscription is associated with the
+account you sign into, not with the local profile label.
+
+You can also select **a. Add a different account** in the daily menu. It prompts
+for a profile name, username/display name, email and organization/workspace, then
+opens the new profile for initial sign-in. Select **e. Edit account details** to
+update the labels for existing profiles, or use:
+
+```bash
+bash ./switcheroo.sh edit personal --username "My name" --email "me@example.com" --org "Personal"
+bash ./switcheroo.sh edit work
+```
+
+The second command prompts interactively. PowerShell accepts the same arguments
+through `./switcheroo.ps1`. Enter keeps an existing value; a command-line option
+with an empty string clears that field.
+
+Menu entries show username, email and organization. These are **user-entered
+labels**, stored privately in the local config, not data retrieved from your
+ChatGPT account. Edit them if you sign into a different account within a profile.
+The tool never inspects tokens or browser cookies to discover identity.
+
+The detected open profile's username appears **green** on interactive terminals.
+The switch menu captures which profile was open before closing the app and marks
+it `[was open]`. `list` marks it `[open]`. `[last opened]` means the last profile
+launched by this tool, not proof of a current login. If no profile can be detected
+or multiple profiles are open, no current-profile color is shown. Noninteractive
+output and `NO_COLOR` disable ANSI colors; Windows uses virtual-terminal support
+when available. Select by number or profile name, or press `q` to cancel.
+
+To update a previously cloned installation without changing its local profiles:
+
+```bash
+git pull --ff-only
+```
+
 ## Commands
 
 Append these arguments to either launcher:
@@ -102,8 +150,9 @@ Append these arguments to either launcher:
 | Arguments | Behavior |
 | --- | --- |
 | `init [--app PATH]` | Create machine-local configuration |
-| `add NAME` | Register another profile |
-| `list` | Show available labels |
+| `add NAME [--username VALUE --email VALUE --org VALUE]` | Register another profile with optional details |
+| `edit NAME [--username VALUE --email VALUE --org VALUE]` | Edit saved account labels |
+| `list` | Show account details and the detected open profile |
 | `doctor` | Show local state path and executable status |
 | `switch` | Close, check updates, prompt, launch |
 | `switch work` | Select a profile without prompting |
@@ -130,7 +179,7 @@ from an independent terminal, because closing ChatGPT ends app-hosted work.
 
 Linux state defaults to `~/.local/share/codex-switcheroo` (or beneath
 `XDG_DATA_HOME`). Windows state is `%LOCALAPPDATA%\codex-switcheroo`.
-`config.json` contains the local executable path and labels. Managed profile
+`config.json` contains the local executable path, profile labels, user-entered account details and last opened profile. Managed profile
 state lives under `profiles/NAME/desktop` and `profiles/NAME/codex`.
 
 The launcher sets `CODEX_ELECTRON_USER_DATA_PATH`, `CODEX_HOME`, and

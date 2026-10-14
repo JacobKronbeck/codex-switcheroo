@@ -10,9 +10,10 @@ import shutil
 import subprocess
 import sys
 import time
+import account_menu
 
 
-class SwitchError(Exception):
+class SwitchError(ValueError):
     pass
 
 
@@ -162,18 +163,36 @@ def check_updates(install=False):
         print(f'Update command returned {result.returncode}; update status is unknown. Continuing with the installed app.', file=sys.stderr)
 
 
-def choose_profile(profiles):
-    print('\nSelect a ChatGPT account profile:')
-    for index, name in enumerate(profiles, 1):
-        print(f'  {index}. {name}')
-    print('  q. Cancel (app stays closed)')
-    while True:
-        choice = input('Account: ').strip()
-        if choice.lower() == 'q':
-            return None
-        if choice.isdigit() and 1 <= int(choice) <= len(profiles):
-            return profiles[int(choice) - 1]
-        print('Enter a listed number or q.')
+def active_profile(config, root):
+    """Identify an open profile from launch arguments without inspecting auth."""
+    import psutil
+    candidates = set()
+    for process in app_processes(config['app']):
+        try:
+            args = process.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if any(arg.startswith('--type=') for arg in args):
+            continue
+        paths = [arg.split('=', 1)[1] for arg in args if arg.startswith('--user-data-dir=')]
+        if '--user-data-dir' in args:
+            index = args.index('--user-data-dir')
+            if index + 1 < len(args):
+                paths.append(args[index + 1])
+        if not paths:
+            candidates.add('default')
+        else:
+            for name in config['profiles']:
+                if name == 'default':
+                    continue
+                expected = os.path.normcase(str((root / 'profiles' / name / 'desktop').resolve()))
+                if any(os.path.normcase(str(Path(path).resolve())) == expected for path in paths):
+                    candidates.add(name)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def choose_profile(config, root, active=None):
+    return account_menu.choose(config, root, active, save_config, valid_name)
 
 
 def main(argv=None):
@@ -183,7 +202,13 @@ def main(argv=None):
     init.add_argument('--app', help='Path to ChatGPT executable')
     add = sub.add_parser('add', help='Register an empty account profile; switch to it to sign in once')
     add.add_argument('name')
-    sub.add_parser('list', help='List saved profile labels')
+    for field in ('username', 'email', 'org'):
+        add.add_argument('--' + field, help='Optional account detail for the menu')
+    edit = sub.add_parser('edit', help='Set account username, email and organization labels')
+    edit.add_argument('name')
+    for field in ('username', 'email', 'org'):
+        edit.add_argument('--' + field)
+    sub.add_parser('list', help='Show account details and currently open profile')
     sub.add_parser('doctor', help='Print paths and executable status, without opening profile data')
     switch = sub.add_parser('switch', help='Close, check updates, select and open')
     switch.add_argument('profile', nargs='?')
@@ -212,10 +237,18 @@ def main(argv=None):
             if name in profiles:
                 raise SwitchError('Profile already exists.')
             profiles.append(name)
+            if any(getattr(args, field) is not None for field in ('username', 'email', 'org')):
+                account_menu.edit(config, name, args)
             save_config(root, config)
             print(f'Added {name}. Run switch {name} and sign into this profile once.')
+        elif args.action == 'edit':
+            if args.name not in profiles:
+                raise SwitchError('Unknown profile. Use list or add NAME.')
+            account_menu.edit(config, args.name, args)
+            save_config(root, config)
+            print('Saved account labels. These do not change your app login.')
         elif args.action == 'list':
-            print('\n'.join(profiles))
+            account_menu.show(config, active_profile(config, root))
         elif args.action == 'doctor':
             print(f'Local state: {root}\nApp: {config["app"]}\nExecutable exists: {Path(config["app"]).is_file()}')
             print('Profile isolation uses internal app settings; Windows and live sign-in still require manual validation.')
@@ -232,10 +265,11 @@ def main(argv=None):
             # Check support before closing the app; update errors leave the menu usable.
             if not args.skip_updates:
                 update_command(args.install_updates)
+            active = active_profile(config, root)
             close_app(config['app'])
             if not args.skip_updates:
                 check_updates(args.install_updates)
-            selected = args.profile or choose_profile(profiles)
+            selected = args.profile or choose_profile(config, root, active)
             if selected is None:
                 return
             command, env = launch_spec(config, root, selected)
@@ -243,6 +277,8 @@ def main(argv=None):
                 subprocess.Popen(command, env=env, start_new_session=(os.name != 'nt'), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError as exc:
                 raise SwitchError('Could not launch the app. Run doctor and check the configured executable.') from exc
+            config['last_opened'] = selected
+            save_config(root, config)
             print(f'Opened profile {selected}. Verify the account in the app; sign in if requested.')
         else:
             parser.print_help()

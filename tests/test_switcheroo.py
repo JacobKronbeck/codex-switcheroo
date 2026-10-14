@@ -56,7 +56,7 @@ class SwitchTests(unittest.TestCase):
 
     def test_switch_order(self):
         events = []
-        with patch.object(s, 'state_root', return_value=self.root), patch.object(s, 'update_command', return_value=['fake']), patch.object(s, 'close_app', side_effect=lambda _: events.append('close')), patch.object(s, 'check_updates', side_effect=lambda _: events.append('update')), patch.object(s, 'choose_profile', side_effect=lambda _: events.append('choose') or 'work'), patch.object(s.subprocess, 'Popen', side_effect=lambda *a, **k: events.append('launch')), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(s, 'state_root', return_value=self.root), patch.object(s, 'active_profile', return_value=None), patch.object(s, 'update_command', return_value=['fake']), patch.object(s, 'close_app', side_effect=lambda _: events.append('close')), patch.object(s, 'check_updates', side_effect=lambda _: events.append('update')), patch.object(s, 'choose_profile', side_effect=lambda *args: events.append('choose') or 'work'), patch.object(s.subprocess, 'Popen', side_effect=lambda *a, **k: events.append('launch')), contextlib.redirect_stdout(io.StringIO()):
             s.main(['switch'])
         self.assertEqual(events, ['close', 'update', 'choose', 'launch'])
 
