@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, Mock
 import sys
+import psutil  # Load the host backend before tests mock sys.platform.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import switcheroo as s
 
