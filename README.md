@@ -1,6 +1,6 @@
 # codex-switcheroo
 
-A simple codex account switcher for your chatgpt app. All in the terminal.
+### A simple codex account switcher for your chatgpt app. All in the terminal.
 
 A Python command with Bash and PowerShell launchers for choosing a **whole
 ChatGPT desktop app account profile** on Fedora or Windows.
